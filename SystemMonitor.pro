@@ -10,8 +10,6 @@ TARGET = SystemMonitor
 
 TEMPLATE = app
 
-LIBS += -lpowrprof
-
 SOURCES += main.cpp \
     systemmonitor.cpp
 

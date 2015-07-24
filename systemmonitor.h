@@ -20,19 +20,21 @@
 #include <QtCore/QProcess>
 #include <QtCore/QSettings>
 #include <QtCore/QTimer>
+#include <QtCore/QTranslator>
 #include <QtCore/qt_windows.h>
 #include <ntdef.h>
 #include <ntstatus.h>
-#include <powrprof.h>
 #include <tlhelp32.h>
 
 class LabelEx : public QLabel
 {
     //Q_OBJECT not required
 public:
-    explicit LabelEx(QWidget *parent);
+    LabelEx(const QString &strAppName, QWidget *parent);
 
 private:
+    explicit LabelEx(const LabelEx &);
+    void operator=(const LabelEx &);
     virtual void mousePressEvent(QMouseEvent *event);
     virtual void mouseMoveEvent(QMouseEvent *event);
     QWidget *const wgtApp;
@@ -43,8 +45,12 @@ class SystemMonitor : public QDialog
 {
     Q_OBJECT
 public:
-    explicit SystemMonitor(bool &bValid);
+    SystemMonitor();
     ~SystemMonitor();
+    inline bool isValid() const
+    {
+        return bValid;
+    }
 
 private:
     typedef struct _PROCESSOR_POWER_INFORMATION
@@ -89,7 +95,7 @@ private:
         TimeZoneBias;
         ULONG CurrentTimeZoneId;
         BYTE Reserved1[20];
-    } SYSTEM_TIMEOFDAY_INFORMATION,*PSYSTEM_TIMEOFDAY_INFORMATION;
+    } SYSTEM_TIMEOFDAY_INFORMATION, *PSYSTEM_TIMEOFDAY_INFORMATION;
 
     typedef enum _SYSTEM_INFORMATION_CLASS
     {
@@ -97,11 +103,17 @@ private:
         SystemProcessorPerformanceDistribution = 100
     } SYSTEM_INFORMATION_CLASS;
 
-    typedef NTSTATUS (WINAPI *PNtQuerySystemInformation)(SYSTEM_INFORMATION_CLASS SystemInformationClass,
-                                                         PVOID SystemInformation, ULONG SystemInformationLength, PULONG ReturnLength);
+    typedef NTSTATUS WINAPI (*PNtQuerySystemInformation)
+    (SYSTEM_INFORMATION_CLASS SystemInformationClass, PVOID SystemInformation,
+     ULONG SystemInformationLength, PULONG ReturnLength);
+    typedef NTSTATUS WINAPI (*PNtPowerInformation)
+    (POWER_INFORMATION_LEVEL InformationLevel, PVOID lpInputBuffer,
+     ULONG nInputBufferSize, PVOID lpOutputBuffer, ULONG nOutputBufferSize);
+
     static HWND hWndApp;
     static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD, HWND hWnd, LONG, LONG, DWORD, DWORD);
     PNtQuerySystemInformation NtQuerySystemInformation;
+    PNtPowerInformation NtPowerInformation;
     DWORD ii;
     DWORDLONG iCurLoad;
 
@@ -142,6 +154,13 @@ private:
     HANDLE hndProc;
     PROCESSENTRY32 processEntry32;
 
+    //Run app
+    PROCESS_INFORMATION pi;
+    STARTUPINFO si;
+
+    //Time
+    SYSTEM_TIMEOFDAY_INFORMATION sysTimeInfo;
+
     LabelEx *lblHeader;
     QLabel *lblMemPhys;
     QProgressBar *prbMemPhys;
@@ -152,13 +171,19 @@ private:
     *lblProcCount;
     QTimer *timer;
     QString strApp;
-    const HWINEVENTHOOK hWinEventHook;
+    HWINEVENTHOOK hWinEventHook;
+    bool bValid;
     bool fGetCpuSpeedFromDistribution();
 
 private slots:
-    inline void slotRunApp() const
+    inline void slotRunApp()
     {
-        QProcess::startDetached(strApp);
+        if (::CreateProcess(0, const_cast<wchar_t*>(static_cast<const wchar_t*>(static_cast<const void*>(strApp.utf16()))),
+                            0, 0, FALSE, CREATE_UNICODE_ENVIRONMENT, 0, 0, &si, &pi))
+        {
+            ::CloseHandle(pi.hThread);
+            ::CloseHandle(pi.hProcess);
+        }
     }
     inline void slotSaveGeometry() const
     {

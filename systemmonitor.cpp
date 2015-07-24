@@ -7,14 +7,14 @@
 #define STATE_SIZE 40
 
 #define TICKS_PER_MUS 10LL        //1 tick = 100NS
-#define TICKS_PER_MS (TICKS_PER_MUS*1000)
-#define TICKS_PER_SEC (TICKS_PER_MS*1000)
-#define TICKS_PER_MIN (TICKS_PER_SEC*60)
-#define TICKS_PER_HOUR (TICKS_PER_MIN*60)
-#define TICKS_PER_DAY (TICKS_PER_HOUR*24)
+#define TICKS_PER_MS (TICKS_PER_MUS*1000LL)
+#define TICKS_PER_SEC (TICKS_PER_MS*1000LL)
+#define TICKS_PER_MIN (TICKS_PER_SEC*60LL)
+#define TICKS_PER_HOUR (TICKS_PER_MIN*60LL)
+#define TICKS_PER_DAY (TICKS_PER_HOUR*24LL)
 
 //-------------------------------------------------------------------------------------------------
-LabelEx::LabelEx(QWidget *parent) : QLabel(qAppName(), parent),
+LabelEx::LabelEx(const QString &strAppName, QWidget *parent) : QLabel(strAppName, parent),
     wgtApp(parent)
 {
     this->setAlignment(Qt::AlignHCenter);
@@ -40,63 +40,55 @@ void LabelEx::mouseMoveEvent(QMouseEvent *event)
 }
 
 //-------------------------------------------------------------------------------------------------
-SystemMonitor::SystemMonitor(bool &bValid) : QDialog(0, Qt::ToolTip),
+SystemMonitor::SystemMonitor() : QDialog(0, Qt::ToolTip),
+    NtPowerInformation(0),
     ii(0),
     pPreviousPerformanceDistribution(0),
     pCurrentPerformanceDistribution(0),
     pBufDistrib(0),
     iLength(0x100),        //1 byte
-    wWinVer(::GetVersion()),        //legal overflow (need manifest to detect Win 8.1+)
-    pFtIdleTime(static_cast<DWORDLONG*>(static_cast<PVOID>(&ftIdleTime))),
-    pFtKernelTime(static_cast<DWORDLONG*>(static_cast<PVOID>(&ftKernelTime))),
-    pFtUserTime(static_cast<DWORDLONG*>(static_cast<PVOID>(&ftUserTime))),
+    wWinVer(::GetVersion()),        //legal overflow (need manifest to detect Win 8.1)
+    pFtIdleTime(static_cast<DWORDLONG*>(static_cast<void*>(&ftIdleTime))),
+    pFtKernelTime(static_cast<DWORDLONG*>(static_cast<void*>(&ftKernelTime))),
+    pFtUserTime(static_cast<DWORDLONG*>(static_cast<void*>(&ftUserTime))),
     iLastLoad(0),
     iLastTotal(0),
     strApp("taskmgr.exe"),
-    hWinEventHook(::SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0, WinEventProc, 0, 0, 0))
+    hWinEventHook(0),
+    bValid(false)
 {
     Q_ASSERT_X(sizeof(DWORDLONG) == sizeof(FILETIME), "Error", "Low and High part DateTime of FILETIME structure");
     Q_ASSERT(sizeof(WORD) == 2);
     Q_ASSERT(FIELD_OFFSET(SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION, States) + sizeof(SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT)*2 == STATE_SIZE);
 
-    const BYTE iMajor = wWinVer,        //legal overflow
-            iMinor = wWinVer >> 8;
-    wWinVer = iMajor << 8 | iMinor;
+    const QString strAppName = qAppName(),
+            strAppDir = qApp->applicationDirPath();
+    QTranslator *translator = new QTranslator(this);
+    if (translator->load(strAppName, strAppDir) || translator->load(strAppName + '_' + QLocale::system().name(), strAppDir))
+        qApp->installTranslator(translator);
+
+    wWinVer = wWinVer << 8 | wWinVer >> 8;
     Q_ASSERT_X(wWinVer >= 0x501 && wWinVer <= 0x603, "Warning", "OS not tested");
-    if (QString::number(iMajor) + '.' + QString::number(iMinor) !=
-            QSettings("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", QSettings::NativeFormat).value("CurrentVersion").toString())
-    {
-        QMessageBox::critical(0, 0, tr("Error:") + " Wrong detect OS");
-        return;
-    }
 
     //Cpu Speed
-    const HMODULE hMod = ::GetModuleHandle(L"ntdll");
-    if (!hMod)
+    if (const HMODULE hMod = ::GetModuleHandle(L"ntdll.dll"))
+        if ((NtQuerySystemInformation = reinterpret_cast<PNtQuerySystemInformation>(::GetProcAddress(hMod, "NtQuerySystemInformation"))))
+            NtPowerInformation = reinterpret_cast<PNtPowerInformation>(::GetProcAddress(hMod, "NtPowerInformation"));
+    if (!NtPowerInformation)
     {
-        QMessageBox::critical(0, 0, tr("Error:") + " Ntdll");
-        return;
-    }
-    if (!(NtQuerySystemInformation = reinterpret_cast<PNtQuerySystemInformation>(GetProcAddress(hMod, "NtQuerySystemInformation"))))
-    {
-        QMessageBox::critical(0, 0, tr("Error:") + " NtQuerySystemInformation");
+        QMessageBox::critical(0, 0, tr("Error:") + " NtQuerySystemInformation/NtPowerInformation");
         return;
     }
 
     SYSTEM_INFO sysInfo;
-    ::GetSystemInfo(&sysInfo);
-    iNumberOfProcessors = sysInfo.dwNumberOfProcessors;
     ::GetNativeSystemInfo(&sysInfo);
-    if (!iNumberOfProcessors || iNumberOfProcessors != sysInfo.dwNumberOfProcessors)
-    {
-        QMessageBox::critical(0, 0, tr("Error:") + " NumberOfProcessors");
-        return;
-    }
+    iNumberOfProcessors = sysInfo.dwNumberOfProcessors;
 
     NTSTATUS ntStatus;
     do
     {
-        pBuffer = malloc(iLength);
+        if (!(pBuffer = malloc(iLength)))
+            return;
         ntStatus = NtQuerySystemInformation(SystemProcessorPerformanceDistribution, pBuffer, iLength, &iLength);
         free(pBuffer);
         ++ii;
@@ -108,25 +100,29 @@ SystemMonitor::SystemMonitor(bool &bValid) : QDialog(0, Qt::ToolTip),
     }
 
     pPowerInformation = new PROCESSOR_POWER_INFORMATION[iNumberOfProcessors];
-    if (::CallNtPowerInformation(ProcessorInformation, 0, 0, pPowerInformation, sizeof(PROCESSOR_POWER_INFORMATION)*iNumberOfProcessors) != STATUS_SUCCESS)
+    if (!NT_SUCCESS(NtPowerInformation(ProcessorInformation, 0, 0, pPowerInformation, sizeof(PROCESSOR_POWER_INFORMATION)*iNumberOfProcessors)))
     {
         QMessageBox::critical(0, 0, tr("Error:") + " CallNtPowerInformation");
         return;
     }
 
-    if (wWinVer >= WINDOWS_7)
-        pBufDistrib = malloc(STATE_SIZE*iNumberOfProcessors);
+    if (wWinVer >= WINDOWS_7 && !(pBufDistrib = malloc(STATE_SIZE*iNumberOfProcessors)))
+        return;
     dBaseCpuSpeed = pPowerInformation[0].MaxMhz/1000.0;
     strBaseGhz = '/' + QString::number(dBaseCpuSpeed, 'f', 2) + ' ' + tr("GHz");
 
     //Memory
-    memStatusEx.dwLength = sizeof(memStatusEx);
+    memStatusEx.dwLength = sizeof(MEMORYSTATUSEX);
 
     //Process count
     processEntry32.dwSize = sizeof(PROCESSENTRY32);
 
+    //Run app
+    memset(&si, 0, sizeof(STARTUPINFO));
+    si.cb = sizeof(STARTUPINFO);
+
     //
-    lblHeader = new LabelEx(this);
+    lblHeader = new LabelEx(strAppName, this);
 
     //
     QTransform transform;
@@ -246,18 +242,18 @@ SystemMonitor::SystemMonitor(bool &bValid) : QDialog(0, Qt::ToolTip),
     connect(timer, SIGNAL(timeout()), this, SLOT(slotTimer()));
 
     //settings
-    QSettings stg(qAppName() + ".ini", QSettings::IniFormat);
+    QSettings stg(strAppDir + '/' + strAppName + ".ini", QSettings::IniFormat);
     stg.setIniCodec("UTF-8");
     if (stg.childGroups().contains("Settings"))
     {
         stg.beginGroup("Settings");
 
         int iStg = stg.value("UpdateInterval").toInt();
-        if (iStg > 0 && iStg <= 90)
-            timer->setInterval(iStg*1000);
+        if (iStg >= 1000 && iStg <= 90000)
+            timer->setInterval(iStg);
 
         iStg = stg.value("Opacity").toInt();
-        if (iStg > 0 && iStg < 255)        //as 255 fully opaque
+        if (iStg > 0 && iStg < 255)        //255 - fully opaque
         {
             ::SetWindowLongPtr(hWndApp, GWL_EXSTYLE, ::GetWindowLongPtr(hWndApp, GWL_EXSTYLE) | WS_EX_LAYERED);
             ::SetLayeredWindowAttributes(hWndApp, 0, iStg, LWA_ALPHA);
@@ -296,16 +292,18 @@ SystemMonitor::SystemMonitor(bool &bValid) : QDialog(0, Qt::ToolTip),
         stg.endGroup();
     }
 
-    bValid = true;
-    this->restoreGeometry(QSettings("UserPrograms", qAppName()).value("Geometry").toByteArray());
+    hWinEventHook = ::SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0, WinEventProc, 0, 0, 0);
+    this->restoreGeometry(QSettings("UserPrograms", strAppName).value("Geometry").toByteArray());
     timer->start();
     slotTimer();
+    bValid = true;
 }
 
 //-------------------------------------------------------------------------------------------------
 SystemMonitor::~SystemMonitor()
 {
-    ::UnhookWinEvent(hWinEventHook);
+    if (hWinEventHook)
+        ::UnhookWinEvent(hWinEventHook);
     delete[] pPowerInformation;
     free(pBufDistrib);
     free(pPreviousPerformanceDistribution);
@@ -319,8 +317,7 @@ HWND SystemMonitor::hWndApp;
 void CALLBACK SystemMonitor::WinEventProc(HWINEVENTHOOK, DWORD, HWND hWnd, LONG, LONG, DWORD, DWORD)
 {
     wchar_t wClassName[9];
-    ::GetClassName(hWnd, wClassName, 9);        //[9 - "WorkerW\0?"]
-    if (wcscmp(wClassName, L"WorkerW") == 0)        //class name desktop (using show desktop function)
+    if (::GetClassName(hWnd, wClassName, 9/*"WorkerW\0?"*/) == 7 && wcscmp(wClassName, L"WorkerW") == 0)        //class name desktop (using show desktop function)
         for (int i = 0; i < 10; ++i)        //repeat several times
         {
             ::SetWindowPos(hWndApp, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -340,14 +337,15 @@ void SystemMonitor::slotShowSettings()
         iAlpha = 255;
     }
 
+    const QString strAppName = qAppName();
     QDialog dialSettings(0, Qt::WindowCloseButtonHint);
-    dialSettings.setWindowTitle(qAppName() + ": " + tr("Settings"));
+    dialSettings.setWindowTitle(strAppName + ": " + tr("Settings"));
 
     QSpinBox *sbInterval = new QSpinBox(&dialSettings);
-    sbInterval->setRange(1, 90);
-    sbInterval->setSuffix(' ' + tr("sec"));
-    sbInterval->setValue(timer->interval()/1000);
-    QLabel *lblInterval = new QLabel(tr("(5 - by default)"), &dialSettings);
+    sbInterval->setRange(1000, 90000);
+    sbInterval->setSuffix(' ' + tr("msec"));
+    sbInterval->setValue(timer->interval());
+    QLabel *lblInterval = new QLabel(tr("(5000 - by default)"), &dialSettings);
     QHBoxLayout *hblInterval = new QHBoxLayout;
     hblInterval->addWidget(sbInterval);
     hblInterval->addWidget(lblInterval);
@@ -383,7 +381,7 @@ void SystemMonitor::slotShowSettings()
     vblSpacing->addSpacing(10);
 
     QLineEdit *leHeaderText = new QLineEdit(lblHeader->text(), &dialSettings);
-    leHeaderText->setPlaceholderText(qAppName());
+    leHeaderText->setPlaceholderText(strAppName);
 
     QPalette pal = lblHeader->palette();
     QPixmap pixmap(16, 16);
@@ -445,7 +443,7 @@ void SystemMonitor::slotShowSettings()
 
     if (dialSettings.exec() == QDialog::Accepted)
     {
-        const int iInterval = sbInterval->value()*1000;
+        const int iInterval = sbInterval->value();
         if (timer->interval() != iInterval)
             timer->setInterval(iInterval);
 
@@ -453,28 +451,23 @@ void SystemMonitor::slotShowSettings()
         strApp = strStg.isEmpty() ? "taskmgr.exe" : strStg;
 
         strStg = leHeaderText->text();
-        lblHeader->setText(strStg.isEmpty() ? qAppName() : strStg);
+        lblHeader->setText(strStg.isEmpty() ? strAppName : strStg);
 
         pal = lblHeader->palette();
 
-        QSettings stg(qAppName() + ".ini", QSettings::IniFormat);
+        QSettings stg(qApp->applicationDirPath() + '/' + strAppName + ".ini", QSettings::IniFormat);
         stg.setIniCodec("UTF-8");
-        stg.remove("");
-        stg.sync();
         stg.beginGroup("Settings");
-        stg.setValue("UpdateInterval", iInterval/1000);
+        stg.setValue("UpdateInterval", iInterval);
         stg.setValue("Opacity", sbOpacity->value());
         stg.setValue("RunApp", strApp);
         stg.setValue("HeightIndicators", sbHeightIndicators->value());
         stg.setValue("Font", this->font().toString());
-        stg.setValue("HeaderText", strStg.isEmpty() ? qAppName() : strStg);
+        stg.setValue("HeaderText", strStg.isEmpty() ? strAppName : strStg);
         stg.setValue("HeaderTextColor", QString("#%1").arg(pal.color(QPalette::WindowText).rgba(), 8, 16, QChar('0')));        //[8 - "aarrggbb"]
         stg.setValue("HeaderBackColor", QString("#%1").arg(pal.color(QPalette::Window).rgba(), 8, 16, QChar('0')));
         stg.setValue("HeaderFont", lblHeader->font().toString());
         stg.endGroup();
-        stg.sync();
-        if (stg.status() /*!= QSettings::NoError*/)
-            QMessageBox::warning(this, 0, tr("Can't save settings"));
     }
     else
     {
@@ -489,29 +482,27 @@ void SystemMonitor::slotShowSettings()
 //-------------------------------------------------------------------------------------------------
 void SystemMonitor::slotShowInfo()
 {
-    SYSTEM_TIMEOFDAY_INFORMATION SysTimeInfo;
-    if (NT_SUCCESS(NtQuerySystemInformation(SystemTimeOfDayInformation, &SysTimeInfo, sizeof(SysTimeInfo), 0)))
+    if (NT_SUCCESS(NtQuerySystemInformation(SystemTimeOfDayInformation, &sysTimeInfo, sizeof(SYSTEM_TIMEOFDAY_INFORMATION), 0)))
     {
-        iTotal = SysTimeInfo.CurrentTime.QuadPart - SysTimeInfo.BootTime.QuadPart;
+        iTotal = sysTimeInfo.CurrentTime.QuadPart - sysTimeInfo.BootTime.QuadPart;
         Q_ASSERT(iTotal > 0);
         QString strInfo = tr("Uptime:") + '\n';
         ii = iTotal/TICKS_PER_DAY;
         if (ii)
-            strInfo += tr("%n day(s)", 0, ii) + ' ';
-        iTotal %= TICKS_PER_DAY;
+            strInfo += QString::number(ii) + tr("d") + ' ';
+        iTotal = iTotal-ii*TICKS_PER_DAY;
         ii = iTotal/TICKS_PER_HOUR;
         if (ii)
-            strInfo += tr("%n hour(s)", 0, ii) + ' ';
-        QToolTip::showText(lblHeader->mapToGlobal(QPoint(0, 0)), strInfo + tr("%n minute(s)", 0, iTotal%TICKS_PER_HOUR/TICKS_PER_MIN));
+            strInfo += QString::number(ii) + tr("h") + ' ';
+        strInfo += QString::number((iTotal-ii*TICKS_PER_HOUR)/TICKS_PER_MIN) + tr("m");
+        QToolTip::showText(lblHeader->mapToGlobal(QPoint(0, 0)), strInfo);
     }
-    else
-        QToolTip::showText(lblHeader->mapToGlobal(QPoint(0, 0)), "?");
 }
 
 //-------------------------------------------------------------------------------------------------
 bool SystemMonitor::fGetCpuSpeedFromDistribution()
 {
-    //Process Hacker 2.33 (http://processhacker.sourceforge.net)
+    //taken from Process Hacker (processhacker.sourceforge.net)
     if (pCurrentPerformanceDistribution->ProcessorCount != iNumberOfProcessors || pPreviousPerformanceDistribution->ProcessorCount != iNumberOfProcessors)
         return false;
     for (ii = 0; ii < iNumberOfProcessors; ++ii)
@@ -573,7 +564,7 @@ bool SystemMonitor::fGetCpuSpeedFromDistribution()
 void SystemMonitor::slotTimer()
 {
     //Cpu Speed
-    if (::CallNtPowerInformation(ProcessorInformation, 0, 0, pPowerInformation, sizeof(PROCESSOR_POWER_INFORMATION)*iNumberOfProcessors) != STATUS_SUCCESS)
+    if (!NT_SUCCESS(NtPowerInformation(ProcessorInformation, 0, 0, pPowerInformation, sizeof(PROCESSOR_POWER_INFORMATION)*iNumberOfProcessors)))
         memset(pPowerInformation, 0, sizeof(PROCESSOR_POWER_INFORMATION)*iNumberOfProcessors);
     if (wWinVer >= WINDOWS_7)
     {
@@ -581,7 +572,11 @@ void SystemMonitor::slotTimer()
             free(pPreviousPerformanceDistribution);
         pPreviousPerformanceDistribution = pCurrentPerformanceDistribution;
         pCurrentPerformanceDistribution = 0;
-        pBuffer = malloc(iLength);
+        if (!(pBuffer = malloc(iLength)))
+        {
+            this->close();
+            return;
+        }
         if (NT_SUCCESS(NtQuerySystemInformation(SystemProcessorPerformanceDistribution, pBuffer, iLength, &iLength)))
             pCurrentPerformanceDistribution = static_cast<PSYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION>(pBuffer);
         else
@@ -627,12 +622,13 @@ void SystemMonitor::slotTimer()
 
     //Process count
     ii = 0;
-    if ((hndProc = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)) != INVALID_HANDLE_VALUE && ::Process32First(hndProc, &processEntry32))
+    if ((hndProc = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)) != INVALID_HANDLE_VALUE)
     {
-        do {++ii;} while (::Process32Next(hndProc, &processEntry32));
+        if (::Process32First(hndProc, &processEntry32))
+            do {++ii;} while (::Process32Next(hndProc, &processEntry32));
         ::CloseHandle(hndProc);
     }
-    lblProcCount->setText(tr("Processes:") + (ii ? (' ' + QString::number(ii)) : " ?"));
+    lblProcCount->setText(tr("Processes:") + ' ' + QString::number(ii));
 }
 
 //-------------------------------------------------------------------------------------------------
