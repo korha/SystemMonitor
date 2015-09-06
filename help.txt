@@ -1,0 +1,6 @@
+Like a gadget for Windows which lets monitor system performance.
+Doesn't use WMI. Support Turbo Boost.
+
+SystemMonitorXP:
+Supported: WinXP
+Special lightweight version optimized for WinXP. Russian translate only.
