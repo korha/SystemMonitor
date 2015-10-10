@@ -1,0 +1,7 @@
+1 24 "SystemMonitor.exe.manifest"
+IDI_ICON1 ICON DISCARDABLE "icon.ico"
+IDI_ICON2 ICON DISCARDABLE "img\\runapp.ico"
+IDI_ICON3 ICON DISCARDABLE "img\\uptime.ico"
+IDI_ICON4 ICON DISCARDABLE "img\\savepos.ico"
+IDI_ICON5 ICON DISCARDABLE "img\\stg.ico"
+IDI_ICON6 ICON DISCARDABLE "img\\close.ico"
