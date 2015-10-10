@@ -8,3 +8,4 @@ Like a gadget for Windows which lets monitor system performance
 - Doesn't use WMI;
 - Change theme/font;
 - DPI aware.
+- Clean WinAPI.
