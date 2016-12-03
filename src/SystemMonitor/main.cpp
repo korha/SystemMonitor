@@ -1,25 +1,104 @@
-#include <cstdio>
+//SystemMonitor
+#define _WIN32_WINNT _WIN32_IE_WINBLUE
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <ntdef.h>
 #include <ntstatus.h>
-#include <tlhelp32.h>
 #include <commctrl.h>
-#include <cassert>
 
-#define TICKS_PER_MUS 10LL        //1 tick = 100NS
-#define TICKS_PER_MS (TICKS_PER_MUS*1000LL)
-#define TICKS_PER_SEC (TICKS_PER_MS*1000LL)
-#define TICKS_PER_MIN (TICKS_PER_SEC*60LL)
-#define TICKS_PER_HOUR (TICKS_PER_MIN*60LL)
-#define TICKS_PER_DAY (TICKS_PER_HOUR*24LL)
+#define IMPORT __declspec(dllimport)
 
-static const wchar_t *const g_wGuidClass = L"App::ec19dd9c-939a-4b05-c2fb-309ff78bcf32",
-*const g_wGuidClassProgress = L"Progress::ec19dd9c-939a-4b05-c2fb-309ff78bcf32",
-#ifdef _WIN64
-*const g_wSettingsApp = L"SystemMonitorSettings64.exe";
+static constexpr const wchar_t *const g_wGuidClass = L"App::ec19dd9c-939a-4b05-c2fb-309ff78bcf32";
+static constexpr const wchar_t *const g_wGuidClassProgress = L"Progress::ec19dd9c-939a-4b05-c2fb-309ff78bcf32";
+static constexpr const wchar_t *const g_wSettingsApp = L"SystemMonitorSettings.exe\"";
+static constexpr const ULONGLONG g_iTicksPerMus = 10;        //1 tick = 100NS
+static constexpr const ULONGLONG g_iTicksPerMs = g_iTicksPerMus*1000;
+static constexpr const ULONGLONG g_iTicksPerSec = g_iTicksPerMs*1000;
+static constexpr const ULONGLONG g_iTicksPerMin = g_iTicksPerSec*60;
+static constexpr const ULONGLONG g_iTicksPerHour = g_iTicksPerMin*60;
+static constexpr const ULONGLONG g_iTicksPerDay = g_iTicksPerHour*24;
+static constexpr const DWORD g_dwBufferSizeProcInfo = 0x100000;
+static HWND g_hWndApp, g_hWndPrbPhysical, g_hWndPrbVirtual, g_hWndPrbCpu, g_hWndCpuSpeed;
+static ULONG g_iPhysicalPercentOld, g_iVirtualPercentOld, g_iCpuLoadOld, g_iCpuSpeedOld, g_iCpuSpeedAll;
+static wchar_t *g_pPercents, *g_pClassName;
+static RECT g_rectBackground, g_rectLoad;
+static HBRUSH g_hbrBackground, g_hbrLoad, g_hbrSysBackground;
+static PAINTSTRUCT *g_pPs;
+static HFONT g_hFont;
+
+//-------------------------------------------------------------------------------------------------
+#ifdef NDEBUG
+#define ___assert___(cond) do{static_cast<void>(sizeof(cond));}while(false)
 #else
-*const g_wSettingsApp = L"SystemMonitorSettings32.exe";
+#define ___assert___(cond) do{if(!(cond)){int i=__LINE__;char h[]="RUNTIME ASSERTION. Line:           "; \
+    if(i>=0){char *c=h+35;do{*--c=i%10+'0';i/=10;}while(i>0);}else{h[25]='?';} \
+    if(MessageBoxA(nullptr,__FILE__,h,MB_ICONERROR|MB_OKCANCEL)==IDCANCEL)ExitProcess(0);}}while(false)
 #endif
+
+template<typename T1, typename T2>
+inline T1 pointer_cast(T2 *const pSrc)
+{return static_cast<T1>(static_cast<void*>(pSrc));}
+
+template<typename T1, typename T2>
+inline T1 pointer_cast(const T2 *const pSrc)
+{return static_cast<T1>(static_cast<const void*>(pSrc));}
+
+static inline void FZeroMemory(void *const pDst__, DWORD dwSize)
+{
+    BYTE *pDst = static_cast<BYTE*>(pDst__);
+    while (dwSize--)
+        *pDst++ = '\0';
+}
+
+static inline void FCopyMemoryW(wchar_t *pDst, const wchar_t *pSrc)
+{
+    while ((*pDst++ = *pSrc++));
+}
+
+static inline wchar_t * FStrChrWNull(wchar_t *pSrc)
+{
+    while (*pSrc)
+        ++pSrc;
+    return pSrc;
+}
+
+static inline void FCopyMemoryWEnd(wchar_t *pDst, const wchar_t *pSrc)
+{
+    while (*pDst)
+        ++pDst;
+    while ((*pDst++ = *pSrc++));
+}
+
+static void FNumToStrW(DWORD dwValue, wchar_t *pBuf)
+{
+    wchar_t *pIt = pBuf;
+    do
+    {
+        *pIt++ = dwValue%10 + L'0';
+        dwValue /= 10;
+    } while (dwValue > 0);
+    *pIt-- = L'\0';
+    do
+    {
+        const wchar_t wTemp = *pIt;
+        *pIt = *pBuf;
+        *pBuf = wTemp;
+    } while (++pBuf < --pIt);
+}
+
+//-------------------------------------------------------------------------------------------------
+typedef enum _SYSTEM_INFORMATION_CLASS
+{
+    SystemTimeOfDayInformation = 3,
+    SystemProcessInformation = 5,
+    SystemProcessorPerformanceDistribution = 100
+} SYSTEM_INFORMATION_CLASS;
+
+extern "C" IMPORT NTSTATUS NTAPI NtPowerInformation
+(POWER_INFORMATION_LEVEL InformationLevel, PVOID lpInputBuffer, ULONG nInputiBufferSize, PVOID lpOutputBuffer, ULONG nOutputBufferSize);
+
+extern "C" IMPORT NTSTATUS NTAPI NtQuerySystemInformation
+(SYSTEM_INFORMATION_CLASS SystemInformationClass, PVOID SystemInformation, ULONG SystemInformationLength, PULONG ReturnLength);
 
 typedef struct _PROCESSOR_POWER_INFORMATION
 {
@@ -65,701 +144,434 @@ typedef struct _SYSTEM_TIMEOFDAY_INFORMATION
     BYTE Reserved1[20];
 } SYSTEM_TIMEOFDAY_INFORMATION;
 
+typedef struct _SYSTEM_PROCESS_INFORMATION
+{
+    ULONG NextEntryOffset;
+    //...
+} SYSTEM_PROCESS_INFORMATION;
+
+struct TagSaveSettings
+{
+    DWORD dwMagic;
+    LONG iDx,
+    iDy;
+    unsigned __int16 iUpdateInterval;
+    BYTE iOpacity;
+    unsigned __int16 iThemeMargin,
+    iThemeGap,
+    iProgressbarWidth,
+    iProgressbarHeight;
+    COLORREF colorRef;
+    unsigned __int16 iLabelHeight;
+    LOGFONT logFont;
+    wchar_t wAppPath[MAX_PATH+2];
+};
+
 struct TagCreateParams
 {
     wchar_t *pBufPath;
     MEMORYSTATUSEX *pMemStatusEx;
-    FILETIME *pFts;
+    ULONGLONG *pFts;
     PROCESS_INFORMATION *pPi;
     STARTUPINFO *pSi;
     SYSTEM_TIMEOFDAY_INFORMATION *pSysTimeInfo;
-    PROCESSENTRY32 *pProcessEntry32;
-    WNDCLASS *pWndCl;
+    WNDCLASSEX *pWndCl;
     RECT *pRectGeometry;
+    TagSaveSettings *tgSave;
 };
 
 //-------------------------------------------------------------------------------------------------
-inline SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION* fByteToSppsd(BYTE *pByte)
+static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD, HWND hWnd, LONG, LONG, DWORD, DWORD)
 {
-    return static_cast<SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION*>(static_cast<void*>(pByte));
-}
-inline SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION* fByteToSppd(BYTE *pByte)
-{
-    return static_cast<SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION*>(static_cast<void*>(pByte));
-}
-inline BYTE* fSppdToByte(SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION *pSppd)
-{
-    return static_cast<BYTE*>(static_cast<void*>(pSppd));
-}
-inline BYTE* fSpphToByte(SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT *pSpph)
-{
-    return static_cast<BYTE*>(static_cast<void*>(pSpph));
-}
-inline const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8* fByteToSpphw(const BYTE *pByte)
-{
-    return static_cast<const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8*>(static_cast<const void*>(pByte));
-}
-inline const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8* fSpphToSpphw(const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT *pSpph)
-{
-    return static_cast<const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8*>(static_cast<const void*>(pSpph));
-}
-inline bool fOk(const wchar_t *const wOk)
-{
-    return !(*wOk || errno);
-}
-
-//-------------------------------------------------------------------------------------------------
-static HWND hWndApp, hWndPrbPhysical, hWndPrbVirtual, hWndPrbCpu, hWndCpuSpeed;
-static ULONG iPhysicalPercentOld, iVirtualPercentOld, iCpuLoadOld, iCpuSpeedOld, iCpuSpeedAll;
-static wchar_t *pPercents, *pClassName;
-static RECT rectBackground, rectLoad;
-static HBRUSH hbrBackground, hbrLoad, hbrSysBackground;
-static PAINTSTRUCT *pPs;
-static HFONT hFont;
-
-//-------------------------------------------------------------------------------------------------
-void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD, HWND hWnd, LONG, LONG, DWORD, DWORD)
-{
-    if (GetClassName(hWnd, pClassName, 9/*"WorkerW`?"*/) == 7 && wcscmp(pClassName, L"WorkerW") == 0)
-        for (int i = 0; i < 5; ++i)        //repeat several times
+    if (GetClassNameW(hWnd, g_pClassName, 9/*"WorkerW`?"*/) == 7 &&
+            g_pClassName[0] == L'W' &&
+            g_pClassName[1] == L'o' &&
+            g_pClassName[2] == L'r' &&
+            g_pClassName[3] == L'k' &&
+            g_pClassName[4] == L'e' &&
+            g_pClassName[5] == L'r' &&
+            g_pClassName[6] == L'W' &&
+            g_pClassName[7] == L'\0')
+    {
+        int i = 5;        //repeat several times
+        do
         {
-            SetWindowPos(hWndApp, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            SetWindowPos(hWndApp, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE);
-        }
+            SetWindowPos(g_hWndApp, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetWindowPos(g_hWndApp, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE);
+        } while (--i);
+    }
 }
 
 //-------------------------------------------------------------------------------------------------
-LRESULT CALLBACK WindowProcProgress(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+static LRESULT CALLBACK WindowProcProgress(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     if (uMsg == WM_PAINT)
     {
-        assert(hWnd == hWndPrbPhysical || hWnd == hWndPrbVirtual || hWnd == hWndPrbCpu);
-        const ULONG iValue = (hWnd == hWndPrbCpu ? iCpuLoadOld : (hWnd == hWndPrbPhysical ? iPhysicalPercentOld : iVirtualPercentOld));
-        assert(iValue <= 100);
-        rectLoad.right = (rectBackground.right - 1/*fix right border*/)*iValue/100 + 1/*left border*/;
+        ___assert___(hWnd == g_hWndPrbPhysical || hWnd == g_hWndPrbVirtual || hWnd == g_hWndPrbCpu);
+        const ULONG iValue = (hWnd == g_hWndPrbCpu ? g_iCpuLoadOld : (hWnd == g_hWndPrbPhysical ? g_iPhysicalPercentOld : g_iVirtualPercentOld));
+        ___assert___(iValue <= 100);
+        g_rectLoad.right = (g_rectBackground.right - 1/*fix right border*/)*iValue/100 + 1/*left border*/;
         int iLength;
         if (iValue < 10)
         {
-            pPercents[0] = L'0' + iValue;
-            pPercents[1] = L'%';
+            g_pPercents[0] = L'0' + iValue;
+            g_pPercents[1] = L'%';
             iLength = 2;
         }
         else if (iValue < 100)
         {
-            pPercents[0] = L'0' + iValue/10;
-            pPercents[1] = L'0' + iValue%10;
-            pPercents[2] = L'%';
+            g_pPercents[0] = L'0' + iValue/10;
+            g_pPercents[1] = L'0' + iValue%10;
+            g_pPercents[2] = L'%';
             iLength = 3;
         }
         else
         {
-            wcscpy(pPercents, L"100%");
+            FCopyMemoryW(g_pPercents, L"100%");
             iLength = 4;
         }
-        if (const HDC hDc = BeginPaint(hWnd, pPs))
+        if (const HDC hDc = BeginPaint(hWnd, g_pPs))
         {
-            FillRect(hDc, &rectBackground, hbrBackground);
-            FillRect(hDc, &rectLoad, hbrLoad);
-            SelectObject(hDc, hFont);
+            FillRect(hDc, &g_rectBackground, g_hbrBackground);
+            FillRect(hDc, &g_rectLoad, g_hbrLoad);
+            SelectObject(hDc, g_hFont);
             SetBkMode(hDc, TRANSPARENT);
-            DrawText(hDc, pPercents, iLength, &rectBackground, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
-            EndPaint(hWnd, pPs);
+            DrawTextW(hDc, g_pPercents, iLength, &g_rectBackground, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+            EndPaint(hWnd, g_pPs);
         }
         return 0;
     }
-    return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
 //-------------------------------------------------------------------------------------------------
-LRESULT CALLBACK WindowProcStaticCpuSpeed(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
+static LRESULT CALLBACK WindowProcStaticCpuSpeed(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR)
 {
     if (uMsg == WM_CTLCOLORSTATIC)
     {
-        if (reinterpret_cast<HWND>(lParam) == hWndCpuSpeed)
+        if (reinterpret_cast<HWND>(lParam) == g_hWndCpuSpeed)
         {
             SetBkMode(reinterpret_cast<HDC>(wParam), TRANSPARENT);
-            if (iCpuSpeedOld > iCpuSpeedAll)        //Turbo Boost / Turbo Core
+            if (g_iCpuSpeedOld > g_iCpuSpeedAll)        //Turbo Boost (Turbo Core)
                 SetTextColor(reinterpret_cast<HDC>(wParam), RGB(255, 0, 0));
-            return reinterpret_cast<LRESULT>(hbrSysBackground);
+            return reinterpret_cast<LRESULT>(g_hbrSysBackground);
         }
     }
     else if (uMsg == WM_NCDESTROY)
-        RemoveWindowSubclass(hWnd, WindowProcStaticCpuSpeed, 1);
+        RemoveWindowSubclass(hWnd, WindowProcStaticCpuSpeed, uIdSubclass);
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
 
 //-------------------------------------------------------------------------------------------------
-LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    typedef enum _SYSTEM_INFORMATION_CLASS
+    enum
     {
-        SystemTimeOfDayInformation = 3,
-        SystemProcessorPerformanceDistribution = 100
-    } SYSTEM_INFORMATION_CLASS;
+        eRunApp = 1,
+        eUptime,
+        eSavePos,
+        eStg,
+        eClose,
+    };
 
-    typedef NTSTATUS WINAPI (*PNtQuerySystemInformation)
-            (SYSTEM_INFORMATION_CLASS SystemInformationClass, PVOID SystemInformation,
-             ULONG SystemInformationLength, PULONG ReturnLength);
-
-    typedef NTSTATUS WINAPI (*PNtPowerInformation)
-            (POWER_INFORMATION_LEVEL InformationLevel, PVOID lpInputBuffer,
-             ULONG nInputiBufferSize, PVOID lpOutputBuffer, ULONG nOutputiBufferSize);
-
-    enum {eRunApp = 1, eUptime, eSavePos, eStg, eClose};
-    enum {eWinVista = 0x600, eWin7 = 0x601, eWin8_1 = 0x603};
-
-    static const ULONG iStateSize = FIELD_OFFSET(SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION, States) + 2*sizeof(SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT);
-    assert(iStateSize == 40);
+    static constexpr const DWORD dwMagic = 0x29D6036C;
+    static constexpr const ULONG iStateSize = FIELD_OFFSET(SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION, States) + 2*sizeof(SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT);
+    ___assert___(iStateSize == 40);
+    ___assert___(_WIN32_WINNT_WINBLUE == 0x0603);
 
     static HWINEVENTHOOK hWinEventHook;
-    static PNtQuerySystemInformation NtQuerySystemInformation;
-    static PNtPowerInformation NtPowerInformation;
     static DWORD dwNumberOfProcessors, dwProcessorsSize;
     static PROCESSOR_POWER_INFORMATION *pPowerInformation;
     static BYTE *pDifferences;
     static ULONG iBufferSize;
     static SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION *pBufferA, *pBufferB;
+    static SYSTEM_PROCESS_INFORMATION *pBufferProcInfo;
+    static HICON hIconRunApp, hIconUptime, hIconSavePos, hIconStg, hIconClose;
     static HWND hWndPhysical, hWndVirtual, hWndProcUptime;
-    static wchar_t *pRunApp, *pPath, *pPhysical, *pVirtual, *pCpuSpeed, *pProcesses, *pUptime,
+    static wchar_t *pPath, *pPhysical, *pVirtual, *pCpuSpeed, *pProcesses, *pUptime,
             *pPhysicalAll, *pVirtualAll, *pCpuSpeedAll;
     static SYSTEM_TIMEOFDAY_INFORMATION *pSysTimeInfo;
     static PROCESS_INFORMATION *pPi;
     static STARTUPINFO *pSi;
     static MEMORYSTATUSEX *pMemStatusEx;
-    static PROCESSENTRY32 *pProcessEntry32;
-    static FILETIME *pFtIdleTime, *pFtKernelTime, *pFtUserTime;
-    static const DWORDLONG *pDwIdleTime, *pDwKernelTime, *pDwUserTime;
+    static ULONGLONG *pDwIdleTime, *pDwKernelTime, *pDwUserTime;
     static WORD wWinVer;
     static RECT rectWindow;
-    static ULONG iProcessesOld, iTemp, iTempInt;
-    static ULONGLONG iTempTotal, iTempCount;
+    static ULONG iProcessesOld;
+    static TagSaveSettings *pTgSave;
 
     switch (uMsg)
     {
     case WM_CREATE:
-        if (const HMODULE hMod = GetModuleHandle(L"ntdll.dll"))
-            if ((NtQuerySystemInformation = reinterpret_cast<PNtQuerySystemInformation>(GetProcAddress(hMod, "NtQuerySystemInformation"))) &&
-                    ((NtPowerInformation = reinterpret_cast<PNtPowerInformation>(GetProcAddress(hMod, "NtPowerInformation")))))
-            {
-                SYSTEM_INFO sysInfo;
-                GetNativeSystemInfo(&sysInfo);
-                dwNumberOfProcessors = sysInfo.dwNumberOfProcessors;
-                dwProcessorsSize = dwNumberOfProcessors*sizeof(PROCESSOR_POWER_INFORMATION);
-                if ((pPowerInformation = static_cast<PROCESSOR_POWER_INFORMATION*>(malloc(dwProcessorsSize))))
+    {
+        const CREATESTRUCT *const crStruct = reinterpret_cast<const CREATESTRUCT*>(lParam);
+        const TagCreateParams *tgCreateParams = static_cast<const TagCreateParams*>(crStruct->lpCreateParams);
+        pPath = tgCreateParams->pBufPath;
+        pPi = tgCreateParams->pPi;
+        pSi = tgCreateParams->pSi;
+        const HANDLE hFile = CreateFileW(pPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            pTgSave = tgCreateParams->tgSave;
+            bool bOk = false;
+            DWORD dwBytes;
+            LARGE_INTEGER iFileSize;
+            if (GetFileSizeEx(hFile, &iFileSize) && iFileSize.QuadPart == sizeof(TagSaveSettings) &&
+                    ReadFile(hFile, pTgSave, sizeof(TagSaveSettings), &dwBytes, nullptr) && dwBytes == sizeof(TagSaveSettings))
+                bOk = true;
+            CloseHandle(hFile);
+
+            if (bOk && pTgSave->dwMagic == dwMagic &&
+                    pTgSave->iUpdateInterval >= 1000 && pTgSave->iUpdateInterval <= 30000 &&
+                    pTgSave->iOpacity &&
+                    pTgSave->iThemeMargin <= 1000 &&
+                    pTgSave->iThemeGap <= 1000 &&
+                    pTgSave->iProgressbarWidth <= 10000 &&
+                    pTgSave->iProgressbarHeight <= 1000 &&
+                    pTgSave->iLabelHeight <= 1000 &&
+                    pTgSave->wAppPath[MAX_PATH+2-1] == L'\0' &&
+                    (g_hFont = CreateFontIndirectW(&pTgSave->logFont)))
+                if (const HANDLE hProcHeap = GetProcessHeap())
                 {
-                    wWinVer = GetVersion();
-                    wWinVer = wWinVer << 8 | wWinVer >> 8;
-
-                    if (wWinVer >= eWinVista &&
-                            !((pDifferences = static_cast<BYTE*>(malloc(iStateSize*dwNumberOfProcessors))) &&
-                              NtQuerySystemInformation(SystemProcessorPerformanceDistribution, 0, 0, &iBufferSize) == STATUS_INFO_LENGTH_MISMATCH &&
-                              ((pBufferA = static_cast<SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION*>(malloc(iBufferSize*2)))) &&
-                              NT_SUCCESS(NtQuerySystemInformation(SystemProcessorPerformanceDistribution, pBufferA, iBufferSize, 0))))
-                        return -1;
-
-                    pBufferB = fByteToSppd((fSppdToByte(pBufferA) + iBufferSize));
-
-                    const CREATESTRUCT *const crStruct = reinterpret_cast<const CREATESTRUCT*>(lParam);
-                    const TagCreateParams *tgCreateParams = static_cast<const TagCreateParams*>(crStruct->lpCreateParams);
-                    //[MAX_PATH+MAX_PATH+136] = [999000/999000 MB`999000/999000 MB`99.00/99.00 Ghz`Processes: 99000`Uptime: 9999d 23h 59m`/999000 MB`/999000 MB`/99.00 Ghz`100%`WorkerW`?]
-                    pPath = tgCreateParams->pBufPath;
-                    pPhysical = pPath+MAX_PATH*2;
-                    pVirtual = pPath+MAX_PATH*2+17;
-                    pCpuSpeed = pPath+MAX_PATH*2+34;
-                    pProcesses = pPath+MAX_PATH*2+50;
-                    pUptime = pPath+MAX_PATH*2+67;
-                    pPhysicalAll = pPath+MAX_PATH*2+89;
-                    pVirtualAll = pPath+MAX_PATH*2+100;
-                    pCpuSpeedAll = pPath+MAX_PATH*2+111;
-                    pPercents = pPath+MAX_PATH*2+122;
-                    pClassName = pPath+MAX_PATH*2+127;
-
-                    wcscpy(pProcesses, L"Processes: ");
-                    wcscpy(pUptime, L"Uptime: ");
-                    *pPhysicalAll = L'/';
-                    *pVirtualAll = L'/';
-                    *pCpuSpeedAll = L'/';
-
-                    pMemStatusEx = tgCreateParams->pMemStatusEx;
-                    pFtIdleTime = tgCreateParams->pFts;
-                    pFtKernelTime = tgCreateParams->pFts+1;
-                    pFtUserTime = tgCreateParams->pFts+2;
-                    pDwIdleTime = static_cast<const DWORDLONG*>(static_cast<const void*>(pFtIdleTime));
-                    pDwKernelTime = static_cast<const DWORDLONG*>(static_cast<const void*>(pFtKernelTime));
-                    pDwUserTime = static_cast<const DWORDLONG*>(static_cast<const void*>(pFtUserTime));
-                    pPi = tgCreateParams->pPi;
-                    pSi = tgCreateParams->pSi;
-                    pSysTimeInfo = tgCreateParams->pSysTimeInfo;
-                    pProcessEntry32 = tgCreateParams->pProcessEntry32;
-
-                    if (GlobalMemoryStatusEx(pMemStatusEx) && NT_SUCCESS(NtPowerInformation(ProcessorInformation, 0, 0, pPowerInformation, dwProcessorsSize)))
+                    SYSTEM_INFO sysInfo;
+                    GetNativeSystemInfo(&sysInfo);
+                    dwNumberOfProcessors = sysInfo.dwNumberOfProcessors;
+                    dwProcessorsSize = dwNumberOfProcessors*sizeof(PROCESSOR_POWER_INFORMATION);
+                    if ((pPowerInformation = static_cast<PROCESSOR_POWER_INFORMATION*>(HeapAlloc(hProcHeap, HEAP_NO_SERIALIZE, dwProcessorsSize))))
                     {
-                        int iStgDx = 0,
-                                iStgDy = 0,
-                                iUpdateInterval = 5000,
-                                iOpacity = 255,
-                                iThemeMargin = 5,
-                                iThemeGap = 15,
-                                iPrbWidth = 150,
-                                iPrbHeight = 15,
-                                iLabelHeight = 13;
-                        COLORREF colorRefLoad = RGB(6, 176, 37);
-
-                        if (FILE *file = _wfopen(pPath, L"rb"))
+                        wWinVer = GetVersion();
+                        wWinVer = wWinVer << 8 | wWinVer >> 8;
+                        if ((wWinVer < _WIN32_WINNT_VISTA ||
+                             ((pDifferences = static_cast<BYTE*>(HeapAlloc(hProcHeap, HEAP_NO_SERIALIZE, iStateSize*dwNumberOfProcessors))) &&
+                              NtQuerySystemInformation(SystemProcessorPerformanceDistribution, nullptr, 0, &iBufferSize) == STATUS_INFO_LENGTH_MISMATCH &&
+                              ((pBufferA = static_cast<SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION*>(HeapAlloc(hProcHeap, HEAP_NO_SERIALIZE, iBufferSize*2)))) &&
+                              NT_SUCCESS(NtQuerySystemInformation(SystemProcessorPerformanceDistribution, pBufferA, iBufferSize, nullptr)))) &&
+                                (pBufferProcInfo = static_cast<SYSTEM_PROCESS_INFORMATION*>(HeapAlloc(hProcHeap, HEAP_NO_SERIALIZE, g_dwBufferSizeProcInfo))))
                         {
-                            fseek(file, 0, SEEK_END);
-                            size_t szCount = ftell(file);
-                            if (szCount >= 16/*[Settings]nDx=1n*/ *sizeof(wchar_t) && szCount <= 1600*sizeof(wchar_t) && szCount%sizeof(wchar_t) == 0)
-                                if (wchar_t *const wFile = static_cast<wchar_t*>(malloc(szCount + sizeof(wchar_t))))
-                                {
-                                    rewind(file);
-                                    size_t szCountAll = fread(wFile, 1, szCount, file);
-                                    fclose(file);
-                                    file = 0;
-                                    if (szCount == szCountAll && wcsncmp(wFile, L"[Settings]\n", 11) == 0 && (szCountAll /= sizeof(wchar_t), wFile[szCountAll-1] == L'\n'))
-                                    {
-                                        wFile[szCountAll] = L'\0';
-                                        const wchar_t *const wFileFind = wFile+10;
-                                        wchar_t *pForLine = wcsstr(wFileFind, L"\nDx="),
-                                                *pDelim,
-                                                *wOk;
-                                        if (pForLine)
-                                        {
-                                            pForLine += 4;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstoul(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp <= 0x7FFF)
-                                                    iStgDx = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nDy=")))
-                                        {
-                                            pForLine += 4;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstoul(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp <= 0x7FFF)
-                                                    iStgDy = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nUpdateInterval=")))
-                                        {
-                                            pForLine += 16;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstoul(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp >= 1000 && iTemp <= 30000)
-                                                    iUpdateInterval = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nOpacity=")))
-                                        {
-                                            pForLine += 9;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstoul(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp > 1 && iTemp < 255)
-                                                    iOpacity = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nRunApp=")))
-                                        {
-                                            pForLine += 8;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                if ((pRunApp = static_cast<wchar_t*>(malloc((pDelim-pForLine+1)*sizeof(wchar_t)))))
-                                                    wcscpy(pRunApp, pForLine);
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nThemeMargin=")))
-                                        {
-                                            pForLine += 13;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstoul(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp <= 1000)
-                                                    iThemeMargin = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nThemeGap=")))
-                                        {
-                                            pForLine += 10;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstol(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp <= 1000)
-                                                    iThemeGap = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nProgressbarWidth=")))
-                                        {
-                                            pForLine += 18;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstoul(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp >= 80 && iTemp <= 10000)
-                                                    iPrbWidth = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nProgressbarHeight=")))
-                                        {
-                                            pForLine += 19;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstoul(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp <= 1000)
-                                                    iPrbHeight = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nProgressbarColor=")))
-                                        {
-                                            pForLine += 18;
-                                            if ((pDelim = wcschr(pForLine, L'\n')) && pDelim-pForLine == 6/*rrggbb*/)
-                                            {
-                                                *pDelim = L'\0';
-                                                wchar_t wTemp = *pForLine;
-                                                *pForLine = pForLine[4];
-                                                pForLine[4] = wTemp;
-                                                wTemp = pForLine[1];
-                                                pForLine[1] = pForLine[5];
-                                                pForLine[5] = wTemp;
-                                                iTemp = wcstoul(pForLine, &wOk, 16);
-                                                if (fOk(wOk))
-                                                {
-                                                    assert(iTemp <= 0xFFFFFF);
-                                                    colorRefLoad = iTemp;
-                                                }
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nLabelHeight=")))
-                                        {
-                                            pForLine += 13;
-                                            if ((pDelim = wcschr(pForLine, L'\n')))
-                                            {
-                                                *pDelim = L'\0';
-                                                iTemp = wcstoul(pForLine, &wOk, 10);
-                                                if (fOk(wOk) && iTemp <= 1000)
-                                                    iLabelHeight = iTemp;
-                                                *pDelim = L'\n';
-                                            }
-                                        }
-                                        if ((pForLine = wcsstr(wFileFind, L"\nLabelFont=")))
-                                        {
-                                            enum eFont
-                                            {
-                                                eHeight,
-                                                eWidth,
-                                                eEscapement,
-                                                eOrientation,
-                                                eWeight,
-                                                eItalic,
-                                                eUnderline,
-                                                eStrikeOut,
-                                                eCharSet,
-                                                eOutPrecision,
-                                                eClipPrecision,
-                                                eQuality,
-                                                ePitchAndFamily,
-                                                eFaceName,
-                                                eFontNum
-                                            };
+                            pBufferB = pointer_cast<SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION*>(pointer_cast<BYTE*>(pBufferA) + iBufferSize);
 
-                                            pForLine += 11;
-                                            wchar_t *wFontArray[eFontNum];
-                                            wFontArray[0] = pForLine;
-                                            wFontArray[eFontNum-1] = 0;
-                                            for (int i = 1; i < 14; ++i)
-                                            {
-                                                if (!(pForLine = wcschr(pForLine, L',')))
-                                                    break;
-                                                *pForLine = L'\0';
-                                                ++pForLine;
-                                                wFontArray[i] = pForLine;
-                                            }
-                                            if (wFontArray[eFontNum-1] && (pDelim = wcschr(pForLine, L'\n'), pDelim - wFontArray[eFontNum-1] < LF_FACESIZE))
-                                            {
-                                                LONG iFontArray[eFontNum-1];
-                                                for (int i = 0; i < eFontNum-1; ++i)
-                                                {
-                                                    iFontArray[i] = wcstol(wFontArray[i], &wOk, 10);
-                                                    if (!fOk(wOk))
+                            //[MAX_PATH+MAX_PATH+136] = [999000/999000 MB`999000/999000 MB`99.00/99.00 Ghz`Processes: 99000`Uptime: 9999d 23h 59m`/999000 MB`/999000 MB`/99.00 Ghz`100%`WorkerW`?]
+                            pPhysical = pPath+MAX_PATH*2+2;
+                            pVirtual = pPath+MAX_PATH*2+2+17;
+                            pCpuSpeed = pPath+MAX_PATH*2+2+34;
+                            pProcesses = pPath+MAX_PATH*2+2+50;
+                            pUptime = pPath+MAX_PATH*2+2+67;
+                            pPhysicalAll = pPath+MAX_PATH*2+2+89;
+                            pVirtualAll = pPath+MAX_PATH*2+2+100;
+                            pCpuSpeedAll = pPath+MAX_PATH*2+2+111;
+                            g_pPercents = pPath+MAX_PATH*2+2+122;
+                            g_pClassName = pPath+MAX_PATH*2+2+127;
+
+                            FCopyMemoryW(pProcesses, L"Processes: ");
+                            FCopyMemoryW(pUptime, L"Uptime: ");
+                            *pPhysicalAll = L'/';
+                            *pVirtualAll = L'/';
+                            *pCpuSpeedAll = L'/';
+
+                            pMemStatusEx = tgCreateParams->pMemStatusEx;
+                            pDwIdleTime = tgCreateParams->pFts;
+                            pDwKernelTime = pDwIdleTime+1;
+                            pDwUserTime = pDwIdleTime+2;
+                            pSysTimeInfo = tgCreateParams->pSysTimeInfo;
+
+                            if (GlobalMemoryStatusEx(pMemStatusEx) && NT_SUCCESS(NtPowerInformation(ProcessorInformation, nullptr, 0, pPowerInformation, dwProcessorsSize)))
+                            {
+                                const HINSTANCE hInst = crStruct->hInstance;
+                                WNDCLASSEX *const pWndCl = tgCreateParams->pWndCl;
+                                pWndCl->lpfnWndProc = WindowProcProgress;
+                                pWndCl->hbrBackground = reinterpret_cast<HBRUSH>(COLOR_ACTIVEBORDER+1);
+                                pWndCl->lpszClassName = g_wGuidClassProgress;
+                                if (RegisterClassExW(pWndCl) && (pWndCl->lpszClassName = nullptr/*check for unregister at end*/, (g_hbrBackground = CreateSolidBrush(RGB(230, 230, 230)))) && (g_hbrLoad = CreateSolidBrush(pTgSave->colorRef)) &&
+                                        (hIconRunApp = static_cast<HICON>(LoadImageW(hInst, L"IDI_ICON2", IMAGE_ICON, 16, 16, 0))) &&
+                                        (hIconUptime = static_cast<HICON>(LoadImageW(hInst, L"IDI_ICON3", IMAGE_ICON, 16, 16, 0))) &&
+                                        (hIconSavePos = static_cast<HICON>(LoadImageW(hInst, L"IDI_ICON4", IMAGE_ICON, 16, 16, 0))) &&
+                                        (hIconStg = static_cast<HICON>(LoadImageW(hInst, L"IDI_ICON5", IMAGE_ICON, 16, 16, 0))) &&
+                                        (hIconClose = static_cast<HICON>(LoadImageW(hInst, L"IDI_ICON6", IMAGE_ICON, 16, 16, 0))))
+                                    if (const HWND hWndBtnRunApp = CreateWindowExW(WS_EX_NOACTIVATE, WC_BUTTON, nullptr, WS_CHILD | WS_VISIBLE | BS_ICON, pTgSave->iThemeMargin, pTgSave->iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eRunApp), hInst, nullptr))
+                                        if (const HWND hWndBtnUptime = CreateWindowExW(WS_EX_NOACTIVATE, WC_BUTTON, nullptr, WS_CHILD | WS_VISIBLE | BS_ICON, pTgSave->iThemeMargin+16, pTgSave->iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eUptime), hInst, nullptr))
+                                        {
+                                            const int iWidth = pTgSave->iThemeMargin*3+pTgSave->iProgressbarWidth;
+                                            if (const HWND hWndBtnSavePos = CreateWindowExW(WS_EX_NOACTIVATE, WC_BUTTON, nullptr, WS_CHILD | WS_VISIBLE | BS_ICON, iWidth-48, pTgSave->iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eSavePos), hInst, nullptr))
+                                                if (const HWND hWndBtnStg = CreateWindowExW(WS_EX_NOACTIVATE, WC_BUTTON, nullptr, WS_CHILD | WS_VISIBLE | BS_ICON, iWidth-32, pTgSave->iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eStg), hInst, nullptr))
+                                                    if (const HWND hWndBtnClose = CreateWindowExW(WS_EX_NOACTIVATE, WC_BUTTON, nullptr, WS_CHILD | WS_VISIBLE | BS_ICON, iWidth-16, pTgSave->iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eClose), hInst, nullptr))
                                                     {
-                                                        wOk = 0;
-                                                        break;
-                                                    }
-                                                }
-
-                                                if (wOk && iFontArray[eWeight] >= 0 && iFontArray[eWeight] <= 1000 &&
-                                                        (iFontArray[eItalic] | 1) == 1 && (iFontArray[eUnderline] | 1) == 1 && (iFontArray[eStrikeOut] | 1) == 1 &&
-                                                        (iFontArray[eCharSet] | 0xFF) == 0xFF &&
-                                                        (iFontArray[eOutPrecision] | 0xFF) == 0xFF &&
-                                                        (iFontArray[eClipPrecision] | 0xFF) == 0xFF &&
-                                                        (iFontArray[eQuality] | 0xFF) == 0xFF &&
-                                                        (iFontArray[ePitchAndFamily] | 0xFF) == 0xFF)
-                                                {
-                                                    LOGFONT logFont;
-                                                    logFont.lfHeight = iFontArray[eHeight];
-                                                    logFont.lfWidth = iFontArray[eWidth];
-                                                    logFont.lfEscapement = iFontArray[eEscapement];
-                                                    logFont.lfOrientation = iFontArray[eOrientation];
-                                                    logFont.lfWeight = iFontArray[eWeight];
-                                                    logFont.lfItalic = iFontArray[eItalic];
-                                                    logFont.lfUnderline = iFontArray[eUnderline];
-                                                    logFont.lfStrikeOut = iFontArray[eStrikeOut];
-                                                    logFont.lfCharSet = iFontArray[eCharSet];
-                                                    logFont.lfOutPrecision = iFontArray[eOutPrecision];
-                                                    logFont.lfClipPrecision = iFontArray[eClipPrecision];
-                                                    logFont.lfQuality = iFontArray[eQuality];
-                                                    logFont.lfPitchAndFamily = iFontArray[ePitchAndFamily];
-                                                    *pDelim = L'\0';
-                                                    wcscpy(logFont.lfFaceName, wFontArray[eFaceName]);
-                                                    hFont = CreateFontIndirect(&logFont);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    free(wFile);
-                                }
-                            if (file)
-                                fclose(file);
-                        }
-
-                        const HINSTANCE hInst = crStruct->hInstance;
-                        WNDCLASS *const pWndCl = tgCreateParams->pWndCl;
-                        pWndCl->lpfnWndProc = WindowProcProgress;
-                        pWndCl->hbrBackground = reinterpret_cast<HBRUSH>(COLOR_ACTIVEBORDER+1);
-                        pWndCl->lpszClassName = g_wGuidClassProgress;
-                        if (RegisterClass(pWndCl) && (pWndCl->lpszClassName = 0/*check unreg*/, (hbrBackground = CreateSolidBrush(RGB(230, 230, 230)))) && (hbrLoad = CreateSolidBrush(colorRefLoad)))
-                            if (const HWND hWndBtnRunApp = CreateWindowEx(WS_EX_NOACTIVATE, WC_BUTTON, 0, WS_CHILD | WS_VISIBLE | BS_ICON, iThemeMargin, iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eRunApp), hInst, 0))
-                                if (const HWND hWndBtnUptime = CreateWindowEx(WS_EX_NOACTIVATE, WC_BUTTON, 0, WS_CHILD | WS_VISIBLE | BS_ICON, iThemeMargin+16, iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eUptime), hInst, 0))
-                                {
-                                    iTemp = iThemeMargin*3+iPrbWidth;
-                                    if (const HWND hWndBtnSavePos = CreateWindowEx(WS_EX_NOACTIVATE, WC_BUTTON, 0, WS_CHILD | WS_VISIBLE | BS_ICON, iTemp-48, iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eSavePos), hInst, 0))
-                                        if (const HWND hWndBtnStg = CreateWindowEx(WS_EX_NOACTIVATE, WC_BUTTON, 0, WS_CHILD | WS_VISIBLE | BS_ICON, iTemp-32, iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eStg), hInst, 0))
-                                            if (const HWND hWndBtnClose = CreateWindowEx(WS_EX_NOACTIVATE, WC_BUTTON, 0, WS_CHILD | WS_VISIBLE | BS_ICON, iTemp-16, iThemeMargin, 16, 16, hWnd, reinterpret_cast<HMENU>(eClose), hInst, 0))
-                                            {
-                                                rectBackground.left = 1;
-                                                rectBackground.top = 1;
-                                                rectBackground.right = iPrbWidth-1;
-                                                rectBackground.bottom = iPrbHeight-1;
-                                                rectLoad = rectBackground;
-                                                const int iGbMemoryHeight = iThemeGap+iLabelHeight*2+iPrbHeight*2+iThemeMargin*3;
-                                                if (const HWND hWndGbMemory = CreateWindowEx(0, WC_BUTTON, L"Memory", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, iThemeMargin, iThemeMargin*2+16, iThemeMargin*2+iPrbWidth, iGbMemoryHeight, hWnd, 0, hInst, 0))
-                                                    if (const HWND hWndStPhysical = CreateWindowEx(0, WC_STATIC, L"Physic:\0\0", WS_CHILD | WS_VISIBLE, iThemeMargin, iThemeGap, iPrbWidth/3, iLabelHeight, hWndGbMemory, 0, hInst, 0))
-                                                        if ((hWndPhysical = CreateWindowEx(0, WC_STATIC, 0, WS_CHILD | WS_VISIBLE | SS_RIGHT, iThemeMargin+iPrbWidth/3, iThemeGap, iPrbWidth*2/3, iLabelHeight, hWndGbMemory, 0, hInst, 0)) &&
-                                                                (hWndPrbPhysical = CreateWindowEx(0, g_wGuidClassProgress, 0, WS_CHILD | WS_VISIBLE, iThemeMargin, iThemeGap+iLabelHeight, iPrbWidth, iPrbHeight, hWndGbMemory, 0, hInst, 0)))
-                                                            if (const HWND hWndStVirtual = CreateWindowEx(0, WC_STATIC, L"Virtual:", WS_CHILD | WS_VISIBLE, iThemeMargin, iThemeGap+iLabelHeight+iPrbHeight+iThemeMargin*2, iPrbWidth/3, iLabelHeight, hWndGbMemory, 0, hInst, 0))
-                                                                if ((hWndVirtual = CreateWindowEx(0, WC_STATIC, 0, WS_CHILD | WS_VISIBLE | SS_RIGHT, iThemeMargin+iPrbWidth/3, iThemeGap+iLabelHeight+iPrbHeight+iThemeMargin*2, iPrbWidth*2/3, iLabelHeight, hWndGbMemory, 0, hInst, 0)) &&
-                                                                        (hWndPrbVirtual = CreateWindowEx(0, g_wGuidClassProgress, 0, WS_CHILD | WS_VISIBLE, iThemeMargin, iThemeGap+iPrbHeight+iLabelHeight*2+iThemeMargin*2, iPrbWidth, iPrbHeight, hWndGbMemory, 0, hInst, 0)))
-                                                                {
-                                                                    const int iGbCpuHeight = iThemeGap+iLabelHeight*2+iPrbHeight+iThemeMargin*2;
-                                                                    if (const HWND hWndGbCpu = CreateWindowEx(0, WC_BUTTON, L"CPU", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, iThemeMargin, iThemeMargin*3+16+iGbMemoryHeight, iThemeMargin*2+iPrbWidth, iGbCpuHeight, hWnd, 0, hInst, 0))
-                                                                        if (const HWND hWndStLoad = CreateWindowEx(0, WC_STATIC, L"Load:", WS_CHILD | WS_VISIBLE, iThemeMargin, iThemeGap, iPrbWidth, iLabelHeight, hWndGbCpu, 0, hInst, 0))
-                                                                            if ((hWndPrbCpu = CreateWindowEx(0, g_wGuidClassProgress, 0, WS_CHILD | WS_VISIBLE, iThemeMargin, iThemeGap+iLabelHeight, iPrbWidth, iPrbHeight, hWndGbCpu, 0, hInst, 0)))
-                                                                                if (const HWND hWndStCpuSpeed = CreateWindowEx(0, WC_STATIC, L"Speed:", WS_CHILD | WS_VISIBLE, iThemeMargin, iThemeGap+iLabelHeight+iPrbHeight+iThemeMargin, iPrbWidth/3, iLabelHeight, hWndGbCpu, 0, hInst, 0))
-                                                                                    if ((hWndCpuSpeed = CreateWindowEx(0, WC_STATIC, 0, WS_CHILD | WS_VISIBLE | SS_RIGHT, iThemeMargin+iPrbWidth/3, iThemeGap+iLabelHeight+iPrbHeight+iThemeMargin, iPrbWidth*2/3, iLabelHeight, hWndGbCpu, 0, hInst, 0)))
-                                                                                    {
-                                                                                        if (wWinVer >= eWinVista && !((hbrSysBackground = GetSysColorBrush(COLOR_BTNFACE)) &&
-                                                                                                                      SetWindowSubclass(hWndGbCpu, WindowProcStaticCpuSpeed, 1, 0) == TRUE))
-                                                                                            return -1;
-                                                                                        iTemp = iThemeMargin*4+16+iGbMemoryHeight+iGbCpuHeight;
-                                                                                        if ((hWndProcUptime = CreateWindowEx(0, WC_STATIC, 0, WS_CHILD | WS_VISIBLE, iThemeMargin*2, iTemp, iPrbWidth, iLabelHeight, hWnd, 0, hInst, 0)))
-                                                                                            if (HWND hWndTooltip = CreateWindowEx(0, TOOLTIPS_CLASS, 0, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, 0, hInst, 0))
-                                                                                                if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
-                                                                                                {
-                                                                                                    wchar_t wBufTooltips[] = L"Run app\0Uptime\0Save position\0Settings\0Close";
-                                                                                                    TOOLINFO toolInfo;
-                                                                                                    toolInfo.cbSize = sizeof(TOOLINFO);
-                                                                                                    toolInfo.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-                                                                                                    toolInfo.hwnd = hWnd;
-                                                                                                    toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnRunApp);
-                                                                                                    toolInfo.rect = rectWindow;
-                                                                                                    toolInfo.hinst = hInst;
-                                                                                                    toolInfo.lpszText = wBufTooltips;
-                                                                                                    toolInfo.lParam = 0;
-                                                                                                    toolInfo.lpReserved = 0;
-                                                                                                    if (SendMessage(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
-                                                                                                        if ((hWndTooltip = CreateWindowEx(0, TOOLTIPS_CLASS, 0, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, 0, hInst, 0)))
-                                                                                                            if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
-                                                                                                            {
-                                                                                                                toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnUptime);
-                                                                                                                toolInfo.lpszText = wBufTooltips+8;
-                                                                                                                if (SendMessage(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
-                                                                                                                    if ((hWndTooltip = CreateWindowEx(0, TOOLTIPS_CLASS, 0, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, 0, hInst, 0)))
-                                                                                                                        if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
-                                                                                                                        {
-                                                                                                                            toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnSavePos);
-                                                                                                                            toolInfo.lpszText = wBufTooltips+15;
-                                                                                                                            if (SendMessage(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
-                                                                                                                                if ((hWndTooltip = CreateWindowEx(0, TOOLTIPS_CLASS, 0, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, 0, hInst, 0)))
-                                                                                                                                    if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
-                                                                                                                                    {
-                                                                                                                                        toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnStg);
-                                                                                                                                        toolInfo.lpszText = wBufTooltips+29;
-                                                                                                                                        if (SendMessage(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
-                                                                                                                                            if ((hWndTooltip = CreateWindowEx(0, TOOLTIPS_CLASS, 0, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, 0, hInst, 0)))
-                                                                                                                                                if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
-                                                                                                                                                {
-                                                                                                                                                    toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnClose);
-                                                                                                                                                    toolInfo.lpszText = wBufTooltips+38;
-                                                                                                                                                    if (SendMessage(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
-                                                                                                                                                    {
-                                                                                                                                                        RECT *const pRectGeometry = tgCreateParams->pRectGeometry;
-                                                                                                                                                        if (GetWindowRect(hWnd, &rectWindow) && GetClientRect(hWnd, pRectGeometry))
+                                                        g_rectBackground.left = 1;
+                                                        g_rectBackground.top = 1;
+                                                        g_rectBackground.right = pTgSave->iProgressbarWidth-1;
+                                                        g_rectBackground.bottom = pTgSave->iProgressbarHeight-1;
+                                                        g_rectLoad = g_rectBackground;
+                                                        const int iGbMemoryHeight = pTgSave->iThemeGap+pTgSave->iLabelHeight*2+pTgSave->iProgressbarHeight*2+pTgSave->iThemeMargin*3;
+                                                        if (const HWND hWndGbMemory = CreateWindowExW(0, WC_BUTTON, L"Memory", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, pTgSave->iThemeMargin, pTgSave->iThemeMargin*2+16, pTgSave->iThemeMargin*2+pTgSave->iProgressbarWidth, iGbMemoryHeight, hWnd, nullptr, hInst, nullptr))
+                                                            if (const HWND hWndStPhysical = CreateWindowExW(0, WC_STATIC, L"Physic:\0\0", WS_CHILD | WS_VISIBLE, pTgSave->iThemeMargin, pTgSave->iThemeGap, pTgSave->iProgressbarWidth/3, pTgSave->iLabelHeight, hWndGbMemory, nullptr, hInst, nullptr))
+                                                                if ((hWndPhysical = CreateWindowExW(0, WC_STATIC, nullptr, WS_CHILD | WS_VISIBLE | SS_RIGHT, pTgSave->iThemeMargin+pTgSave->iProgressbarWidth/3, pTgSave->iThemeGap, pTgSave->iProgressbarWidth*2/3, pTgSave->iLabelHeight, hWndGbMemory, nullptr, hInst, nullptr)) &&
+                                                                        (g_hWndPrbPhysical = CreateWindowExW(0, g_wGuidClassProgress, nullptr, WS_CHILD | WS_VISIBLE, pTgSave->iThemeMargin, pTgSave->iThemeGap+pTgSave->iLabelHeight, pTgSave->iProgressbarWidth, pTgSave->iProgressbarHeight, hWndGbMemory, nullptr, hInst, nullptr)))
+                                                                    if (const HWND hWndStVirtual = CreateWindowExW(0, WC_STATIC, L"Virtual:", WS_CHILD | WS_VISIBLE, pTgSave->iThemeMargin, pTgSave->iThemeGap+pTgSave->iLabelHeight+pTgSave->iProgressbarHeight+pTgSave->iThemeMargin*2, pTgSave->iProgressbarWidth/3, pTgSave->iLabelHeight, hWndGbMemory, nullptr, hInst, nullptr))
+                                                                        if ((hWndVirtual = CreateWindowExW(0, WC_STATIC, nullptr, WS_CHILD | WS_VISIBLE | SS_RIGHT, pTgSave->iThemeMargin+pTgSave->iProgressbarWidth/3, pTgSave->iThemeGap+pTgSave->iLabelHeight+pTgSave->iProgressbarHeight+pTgSave->iThemeMargin*2, pTgSave->iProgressbarWidth*2/3, pTgSave->iLabelHeight, hWndGbMemory, nullptr, hInst, nullptr)) &&
+                                                                                (g_hWndPrbVirtual = CreateWindowExW(0, g_wGuidClassProgress, nullptr, WS_CHILD | WS_VISIBLE, pTgSave->iThemeMargin, pTgSave->iThemeGap+pTgSave->iProgressbarHeight+pTgSave->iLabelHeight*2+pTgSave->iThemeMargin*2, pTgSave->iProgressbarWidth, pTgSave->iProgressbarHeight, hWndGbMemory, nullptr, hInst, nullptr)))
+                                                                        {
+                                                                            const int iGbCpuHeight = pTgSave->iThemeGap+pTgSave->iLabelHeight*2+pTgSave->iProgressbarHeight+pTgSave->iThemeMargin*2;
+                                                                            if (const HWND hWndGbCpu = CreateWindowExW(0, WC_BUTTON, L"CPU", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, pTgSave->iThemeMargin, pTgSave->iThemeMargin*3+16+iGbMemoryHeight, pTgSave->iThemeMargin*2+pTgSave->iProgressbarWidth, iGbCpuHeight, hWnd, nullptr, hInst, nullptr))
+                                                                                if (const HWND hWndStLoad = CreateWindowExW(0, WC_STATIC, L"Load:", WS_CHILD | WS_VISIBLE, pTgSave->iThemeMargin, pTgSave->iThemeGap, pTgSave->iProgressbarWidth, pTgSave->iLabelHeight, hWndGbCpu, nullptr, hInst, nullptr))
+                                                                                    if ((g_hWndPrbCpu = CreateWindowExW(0, g_wGuidClassProgress, nullptr, WS_CHILD | WS_VISIBLE, pTgSave->iThemeMargin, pTgSave->iThemeGap+pTgSave->iLabelHeight, pTgSave->iProgressbarWidth, pTgSave->iProgressbarHeight, hWndGbCpu, nullptr, hInst, nullptr)))
+                                                                                        if (const HWND hWndStCpuSpeed = CreateWindowExW(0, WC_STATIC, L"Speed:", WS_CHILD | WS_VISIBLE, pTgSave->iThemeMargin, pTgSave->iThemeGap+pTgSave->iLabelHeight+pTgSave->iProgressbarHeight+pTgSave->iThemeMargin, pTgSave->iProgressbarWidth/3, pTgSave->iLabelHeight, hWndGbCpu, nullptr, hInst, nullptr))
+                                                                                            if ((g_hWndCpuSpeed = CreateWindowExW(0, WC_STATIC, nullptr, WS_CHILD | WS_VISIBLE | SS_RIGHT, pTgSave->iThemeMargin+pTgSave->iProgressbarWidth/3, pTgSave->iThemeGap+pTgSave->iLabelHeight+pTgSave->iProgressbarHeight+pTgSave->iThemeMargin, pTgSave->iProgressbarWidth*2/3, pTgSave->iLabelHeight, hWndGbCpu, nullptr, hInst, nullptr)) &&
+                                                                                                    (wWinVer < _WIN32_WINNT_VISTA || ((g_hbrSysBackground = GetSysColorBrush(COLOR_BTNFACE)) && SetWindowSubclass(hWndGbCpu, WindowProcStaticCpuSpeed, 1, 0) == TRUE)))
+                                                                                            {
+                                                                                                const int iHeight = pTgSave->iThemeMargin*4+16+iGbMemoryHeight+iGbCpuHeight;
+                                                                                                if ((hWndProcUptime = CreateWindowExW(0, WC_STATIC, nullptr, WS_CHILD | WS_VISIBLE, pTgSave->iThemeMargin*2, iHeight, pTgSave->iProgressbarWidth, pTgSave->iLabelHeight, hWnd, nullptr, hInst, nullptr)))
+                                                                                                    if (HWND hWndTooltip = CreateWindowExW(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, nullptr, hInst, nullptr))
+                                                                                                        if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+                                                                                                        {
+                                                                                                            wchar_t wBufTooltips[] = L"Run app\0Uptime\0Save position\0Settings\0Close";
+                                                                                                            TOOLINFOW toolInfo;
+                                                                                                            toolInfo.cbSize = sizeof(TOOLINFOW);
+                                                                                                            toolInfo.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+                                                                                                            toolInfo.hwnd = hWnd;
+                                                                                                            toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnRunApp);
+                                                                                                            toolInfo.rect = rectWindow;
+                                                                                                            toolInfo.hinst = hInst;
+                                                                                                            toolInfo.lpszText = wBufTooltips;
+                                                                                                            toolInfo.lParam = 0;
+                                                                                                            toolInfo.lpReserved = nullptr;
+                                                                                                            if (SendMessageW(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
+                                                                                                                if ((hWndTooltip = CreateWindowExW(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, nullptr, hInst, nullptr)))
+                                                                                                                    if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+                                                                                                                    {
+                                                                                                                        toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnUptime);
+                                                                                                                        toolInfo.lpszText = wBufTooltips+8;
+                                                                                                                        if (SendMessageW(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
+                                                                                                                            if ((hWndTooltip = CreateWindowExW(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, nullptr, hInst, nullptr)))
+                                                                                                                                if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+                                                                                                                                {
+                                                                                                                                    toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnSavePos);
+                                                                                                                                    toolInfo.lpszText = wBufTooltips+15;
+                                                                                                                                    if (SendMessageW(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
+                                                                                                                                        if ((hWndTooltip = CreateWindowExW(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, nullptr, hInst, nullptr)))
+                                                                                                                                            if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+                                                                                                                                            {
+                                                                                                                                                toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnStg);
+                                                                                                                                                toolInfo.lpszText = wBufTooltips+29;
+                                                                                                                                                if (SendMessageW(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
+                                                                                                                                                    if ((hWndTooltip = CreateWindowExW(0, TOOLTIPS_CLASS, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hWnd, nullptr, hInst, nullptr)))
+                                                                                                                                                        if (SetWindowPos(hWndTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
                                                                                                                                                         {
-                                                                                                                                                            if (!hFont)
+                                                                                                                                                            toolInfo.uId = reinterpret_cast<UINT_PTR>(hWndBtnClose);
+                                                                                                                                                            toolInfo.lpszText = wBufTooltips+38;
+                                                                                                                                                            if (SendMessageW(hWndTooltip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&toolInfo)) == TRUE)
                                                                                                                                                             {
-                                                                                                                                                                NONCLIENTMETRICS nonClientMetrics;
-                                                                                                                                                                nonClientMetrics.cbSize = sizeof(NONCLIENTMETRICS);
-                                                                                                                                                                if (SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &nonClientMetrics, 0))
-                                                                                                                                                                    hFont = CreateFontIndirect(&nonClientMetrics.lfMessageFont);
-                                                                                                                                                            }
-                                                                                                                                                            if (hFont)
-                                                                                                                                                            {
-                                                                                                                                                                SendMessage(hWndGbMemory, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndStPhysical, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndPhysical, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndStVirtual, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndVirtual, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndGbCpu, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndStLoad, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndStCpuSpeed, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndCpuSpeed, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
-                                                                                                                                                                SendMessage(hWndProcUptime, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), FALSE);
+                                                                                                                                                                RECT *const pRectGeometry = tgCreateParams->pRectGeometry;
+                                                                                                                                                                if (GetWindowRect(hWnd, &rectWindow) && GetClientRect(hWnd, pRectGeometry))
+                                                                                                                                                                {
+                                                                                                                                                                    SendMessageW(hWndGbMemory, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(hWndStPhysical, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(hWndPhysical, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(hWndStVirtual, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(hWndVirtual, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(hWndGbCpu, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(hWndStLoad, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(hWndStCpuSpeed, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(g_hWndCpuSpeed, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
+                                                                                                                                                                    SendMessageW(hWndProcUptime, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFont), FALSE);
 
-                                                                                                                                                                HICON hIcon = static_cast<HICON>(LoadImage(hInst, L"IDI_ICON2", IMAGE_ICON, 16, 16, 0));
-                                                                                                                                                                if (hIcon)
-                                                                                                                                                                {
-                                                                                                                                                                    SendMessage(hWndBtnRunApp, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIcon));
-                                                                                                                                                                    DestroyIcon(hIcon);
-                                                                                                                                                                }
-                                                                                                                                                                if ((hIcon = static_cast<HICON>(LoadImage(hInst, L"IDI_ICON3", IMAGE_ICON, 16, 16, 0))))
-                                                                                                                                                                {
-                                                                                                                                                                    SendMessage(hWndBtnUptime, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIcon));
-                                                                                                                                                                    DestroyIcon(hIcon);
-                                                                                                                                                                }
-                                                                                                                                                                if ((hIcon = static_cast<HICON>(LoadImage(hInst, L"IDI_ICON4", IMAGE_ICON, 16, 16, 0))))
-                                                                                                                                                                {
-                                                                                                                                                                    SendMessage(hWndBtnSavePos, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIcon));
-                                                                                                                                                                    DestroyIcon(hIcon);
-                                                                                                                                                                }
-                                                                                                                                                                if ((hIcon = static_cast<HICON>(LoadImage(hInst, L"IDI_ICON5", IMAGE_ICON, 16, 16, 0))))
-                                                                                                                                                                {
-                                                                                                                                                                    SendMessage(hWndBtnStg, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIcon));
-                                                                                                                                                                    DestroyIcon(hIcon);
-                                                                                                                                                                }
-                                                                                                                                                                if ((hIcon = static_cast<HICON>(LoadImage(hInst, L"IDI_ICON6", IMAGE_ICON, 16, 16, 0))))
-                                                                                                                                                                {
-                                                                                                                                                                    SendMessage(hWndBtnClose, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIcon));
-                                                                                                                                                                    DestroyIcon(hIcon);
-                                                                                                                                                                }
+                                                                                                                                                                    SendMessageW(hWndBtnRunApp, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIconRunApp));
+                                                                                                                                                                    SendMessageW(hWndBtnUptime, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIconUptime));
+                                                                                                                                                                    SendMessageW(hWndBtnSavePos, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIconSavePos));
+                                                                                                                                                                    SendMessageW(hWndBtnStg, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIconStg));
+                                                                                                                                                                    SendMessageW(hWndBtnClose, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(hIconClose));
 
-                                                                                                                                                                if (!pRunApp)
-                                                                                                                                                                    if ((pRunApp = static_cast<wchar_t*>(malloc(12/*taskmgr.exe`*/ *sizeof(wchar_t)))))
-                                                                                                                                                                        wcscpy(pRunApp, L"taskmgr.exe");
-                                                                                                                                                                if (pRunApp && SetTimer(hWnd, 1, iUpdateInterval, 0))
-                                                                                                                                                                {
-                                                                                                                                                                    pRectGeometry->left = iStgDx;
-                                                                                                                                                                    pRectGeometry->top = iStgDy;
-                                                                                                                                                                    pRectGeometry->right = iThemeMargin*4+iPrbWidth+(rectWindow.right - pRectGeometry->right);
-                                                                                                                                                                    pRectGeometry->bottom = iTemp+iLabelHeight+iThemeMargin+(rectWindow.bottom - pRectGeometry->bottom);
-                                                                                                                                                                    assert(rectWindow.left == 0 && rectWindow.top == 0);
-                                                                                                                                                                    rectWindow.right = iPrbWidth;
-                                                                                                                                                                    rectWindow.bottom = iPrbHeight;
-
-                                                                                                                                                                    wcscat(ulltow(pMemStatusEx->ullTotalPhys >> 20, pPhysicalAll+1, 10), L" MB");
-
-                                                                                                                                                                    iTemp = pPowerInformation[0].MaxMhz/10;
-                                                                                                                                                                    iCpuSpeedAll = iTemp;
-                                                                                                                                                                    iTempInt = iTemp/100;
-                                                                                                                                                                    _ultow(iTempInt, pCpuSpeedAll+1, 10);
-                                                                                                                                                                    wchar_t *const pDelim = pCpuSpeedAll + (iTempInt >= 10 ? 3 : 2);
-                                                                                                                                                                    *pDelim = L'.';
-                                                                                                                                                                    iTemp -= iTempInt*100;
-                                                                                                                                                                    pDelim[1] = L'0' + iTemp/10;
-                                                                                                                                                                    pDelim[2] = L'0' + iTemp%10;
-                                                                                                                                                                    wcscpy(pDelim+3, L" GHz");
-                                                                                                                                                                    SetWindowText(hWndCpuSpeed, pCpuSpeedAll+1);
-
-                                                                                                                                                                    if (iOpacity < 255)
+                                                                                                                                                                    if (SetTimer(hWnd, 1, pTgSave->iUpdateInterval, nullptr))
                                                                                                                                                                     {
-                                                                                                                                                                        SetWindowLongPtr(hWnd, GWL_EXSTYLE, WS_EX_WINDOWEDGE | WS_EX_LAYERED);
-                                                                                                                                                                        if (!SetLayeredWindowAttributes(hWnd, 0, iOpacity, LWA_ALPHA))
-                                                                                                                                                                            return -1;
-                                                                                                                                                                    }
+                                                                                                                                                                        pRectGeometry->left = pTgSave->iDx;
+                                                                                                                                                                        pRectGeometry->top = pTgSave->iDy;
+                                                                                                                                                                        pRectGeometry->right = pTgSave->iThemeMargin*4+pTgSave->iProgressbarWidth+(rectWindow.right - pRectGeometry->right);
+                                                                                                                                                                        pRectGeometry->bottom = iHeight+pTgSave->iLabelHeight+pTgSave->iThemeMargin+(rectWindow.bottom - pRectGeometry->bottom);
+                                                                                                                                                                        ___assert___(rectWindow.left == 0 && rectWindow.top == 0);
+                                                                                                                                                                        rectWindow.right = pTgSave->iProgressbarWidth;
+                                                                                                                                                                        rectWindow.bottom = pTgSave->iProgressbarHeight;
 
-                                                                                                                                                                    hWndApp = hWnd;
-                                                                                                                                                                    if (wWinVer <= eWinVista /*bad work in XP*/ ||
-                                                                                                                                                                            (hWinEventHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0, WinEventProc, 0, 0, 0)))
+                                                                                                                                                                        FNumToStrW(pMemStatusEx->ullTotalPhys >> 20, pPhysicalAll+1);
+                                                                                                                                                                        FCopyMemoryWEnd(pPhysicalAll+1, L" MB");
+
+                                                                                                                                                                        ULONG iCpuAll = pPowerInformation[0].MaxMhz/10;
+                                                                                                                                                                        g_iCpuSpeedAll = iCpuAll;
+                                                                                                                                                                        const ULONG iCpuShort = iCpuAll/100;
+                                                                                                                                                                        FNumToStrW(iCpuShort, pCpuSpeedAll+1);
+                                                                                                                                                                        wchar_t *const pDelim = pCpuSpeedAll + (iCpuShort >= 10 ? 3 : 2);
+                                                                                                                                                                        *pDelim = L'.';
+                                                                                                                                                                        iCpuAll -= iCpuShort*100;
+                                                                                                                                                                        pDelim[1] = L'0' + iCpuAll/10;
+                                                                                                                                                                        pDelim[2] = L'0' + iCpuAll%10;
+                                                                                                                                                                        FCopyMemoryW(pDelim+3, L" GHz");
+                                                                                                                                                                        SetWindowTextW(g_hWndCpuSpeed, pCpuSpeedAll+1);
+
+                                                                                                                                                                        if (pTgSave->iOpacity < 255)
+                                                                                                                                                                        {
+                                                                                                                                                                            SetWindowLongPtrW(hWnd, GWL_EXSTYLE, WS_EX_WINDOWEDGE | WS_EX_LAYERED);
+                                                                                                                                                                            SetLayeredWindowAttributes(hWnd, 0, pTgSave->iOpacity, LWA_ALPHA);
+                                                                                                                                                                        }
+
+                                                                                                                                                                        if (wWinVer >= _WIN32_WINNT_VISTA)        //bad work in XP
+                                                                                                                                                                            hWinEventHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, WinEventProc, 0, 0, 0);
+                                                                                                                                                                        g_hWndApp = hWnd;
                                                                                                                                                                         return 0;
+                                                                                                                                                                    }
                                                                                                                                                                 }
                                                                                                                                                             }
                                                                                                                                                         }
-                                                                                                                                                    }
-                                                                                                                                                }
-                                                                                                                                    }
-                                                                                                                        }
-                                                                                                            }
-                                                                                                }
-                                                                                    }
-                                                                }
-                                            }
-                                }
+                                                                                                                                            }
+                                                                                                                                }
+                                                                                                                    }
+                                                                                                        }
+                                                                                            }
+                                                                        }
+                                                    }
+                                        }
+                            }
+                        }
                     }
                 }
-            }
+        }
+        else if (CreateProcessW(nullptr, pPath+MAX_PATH, nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, pSi, pPi))
+        {
+            CloseHandle(pPi->hThread);
+            CloseHandle(pPi->hProcess);
+        }
         return -1;
+    }
     case WM_COMMAND:
     {
-        assert(HIWORD(wParam) == 0);
+        ___assert___(HIWORD(wParam) == 0);
         bool bRunApp = false;
         switch (wParam)
         {
         case eUptime:
-            if (NT_SUCCESS(NtQuerySystemInformation(SystemTimeOfDayInformation, pSysTimeInfo, sizeof(SYSTEM_TIMEOFDAY_INFORMATION), 0)))
+            if (NT_SUCCESS(NtQuerySystemInformation(SystemTimeOfDayInformation, pSysTimeInfo, sizeof(SYSTEM_TIMEOFDAY_INFORMATION), nullptr)))
             {
                 pSysTimeInfo->CurrentTime.QuadPart -= pSysTimeInfo->BootTime.QuadPart;
-                assert(pSysTimeInfo->CurrentTime.QuadPart > 0);
-                wchar_t *pDelim = pUptime+8/*Uptime: */;
-                if ((iTempTotal = pSysTimeInfo->CurrentTime.QuadPart/TICKS_PER_DAY))        //days
+                ___assert___(pSysTimeInfo->CurrentTime.QuadPart > 0);
+                wchar_t *pDelim = pUptime+8;        //"Uptime: ";
+                ULONG iTempTotal = pSysTimeInfo->CurrentTime.QuadPart/g_iTicksPerDay;
+                if (iTempTotal)        //days
                 {
-                    lltow(iTempTotal, pDelim, 10);
-                    pDelim = wcschr(pDelim, L'\0');
-                    wcscpy(pDelim, L"d ");
+                    FNumToStrW(iTempTotal, pDelim);
+                    pDelim = FStrChrWNull(pDelim);
+                    FCopyMemoryW(pDelim, L"d ");
                     pDelim += 2;
-                    pSysTimeInfo->CurrentTime.QuadPart -= iTempTotal*TICKS_PER_DAY;
+                    pSysTimeInfo->CurrentTime.QuadPart -= iTempTotal*g_iTicksPerDay;
                 }
-                if ((iTempTotal = pSysTimeInfo->CurrentTime.QuadPart/TICKS_PER_HOUR))        //hours
+                iTempTotal = pSysTimeInfo->CurrentTime.QuadPart/g_iTicksPerHour;
+                if (iTempTotal)        //hours
                 {
-                    lltow(iTempTotal, pDelim, 10);
-                    pDelim = wcschr(pDelim, L'\0');
-                    wcscpy(pDelim, L"h ");
+                    FNumToStrW(iTempTotal, pDelim);
+                    pDelim = FStrChrWNull(pDelim);
+                    FCopyMemoryW(pDelim, L"h ");
                     pDelim += 2;
-                    pSysTimeInfo->CurrentTime.QuadPart -= iTempTotal*TICKS_PER_HOUR;
+                    pSysTimeInfo->CurrentTime.QuadPart -= iTempTotal*g_iTicksPerHour;
                 }
-                pSysTimeInfo->CurrentTime.QuadPart /= TICKS_PER_MIN;
-                wcscat(lltow(pSysTimeInfo->CurrentTime.QuadPart, pDelim, 10), L"m");        //minutes
-                SetWindowText(hWndProcUptime, pUptime);
+                pSysTimeInfo->CurrentTime.QuadPart /= g_iTicksPerMin;
+                FNumToStrW(pSysTimeInfo->CurrentTime.QuadPart, pDelim);
+                FCopyMemoryWEnd(pDelim, L"m");        //minutes
+                SetWindowTextW(hWndProcUptime, pUptime);
                 iProcessesOld = 0;        //force update label
             }
             break;
@@ -768,99 +580,49 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             RECT rect;
             if (GetWindowRect(hWnd, &rect))
             {
-                size_t szSub = 11,        //[11 = "[Settings]\n"]
-                        szCountAll;
-                wchar_t *wFile = 0,
-                        *pForLine;
-                bool bLoad = false;
-                FILE *file = _wfopen(pPath, L"rb");
-                if (file)
+                pTgSave->iDx = rect.left;
+                pTgSave->iDy = rect.top;
+                const HANDLE hFile = CreateFileW(pPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (hFile != INVALID_HANDLE_VALUE)
                 {
-                    fseek(file, 0, SEEK_END);
-                    const size_t szCount = ftell(file);
-                    if (szCount >= 16/*[Settings]nDx=1n*/ *sizeof(wchar_t) && szCount <= 1600*sizeof(wchar_t) && szCount%sizeof(wchar_t) == 0)
-                        if ((wFile = static_cast<wchar_t*>(malloc(szCount + sizeof(wchar_t)))))
-                        {
-                            rewind(file);
-                            szCountAll = fread(wFile, 1, szCount, file);
-                            if (szCount == szCountAll && wcsncmp(wFile, L"[Settings]\n", 11) == 0 && (szCountAll /= sizeof(wchar_t), wFile[szCountAll-1] == L'\n'))
-                            {
-                                wFile[szCountAll] = L'\0';
-                                if ((pForLine = wcsstr(wFile, L"\nDx=")))
-                                {
-                                    if (const wchar_t *const pDelim = wcschr(pForLine+4, L'\n'))
-                                    {
-                                        szSub += pDelim-pForLine;
-                                        wcscpy(pForLine, pDelim);
-                                    }
-                                }
-                                if ((pForLine = wcsstr(wFile, L"\nDy=")))
-                                    if (const wchar_t *const pDelim = wcschr(pForLine+4, L'\n'))
-                                    {
-                                        szSub += pDelim-pForLine;
-                                        wcscpy(pForLine, pDelim);
-                                    }
-                                bLoad = true;
-                            }
-                        }
-                    fclose(file);
+                    DWORD dwBytes;
+                    WriteFile(hFile, pTgSave, sizeof(TagSaveSettings), &dwBytes, nullptr);
+                    CloseHandle(hFile);
                 }
-                file = _wfopen(pPath, L"wb");
-                if (file)
-                {
-                    if ((rect.left | 0x7FFF) != 0x7FFF)
-                        rect.left = 0;
-                    if ((rect.top | 0x7FFF) != 0x7FFF)
-                        rect.top = 0;
-
-                    wchar_t wBuf[30] = L"[Settings]\nDx=";        //[30 = "[Settings]nDx=32767nDy=32767n`"]
-                    _ltow(rect.left, wBuf+14, 10);
-                    pForLine = wcschr(wBuf+15, L'\0');
-                    wcscpy(pForLine, L"\nDy=");
-                    pForLine += 4;
-                    _ltow(rect.top, pForLine, 10);
-                    pForLine = wcschr(pForLine, L'\0');
-                    *pForLine = L'\n';
-                    ++pForLine;
-                    fwrite(wBuf, (pForLine-wBuf)*sizeof(wchar_t), 1, file);
-                    if (bLoad)
-                        fwrite(wFile+11, (szCountAll-szSub)*sizeof(wchar_t), 1, file);
-                    fclose(file);
-                }
-                free(wFile);
             }
             break;
         }
         case eRunApp:
             bRunApp = true;
         case eStg:
-            if (CreateProcess(0, bRunApp ? pRunApp : pPath+MAX_PATH, 0, 0, FALSE, CREATE_UNICODE_ENVIRONMENT, 0, 0, pSi, pPi))
+            if (CreateProcessW(nullptr, bRunApp ? pTgSave->wAppPath : pPath+MAX_PATH, nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, pSi, pPi))
             {
                 CloseHandle(pPi->hThread);
                 CloseHandle(pPi->hProcess);
             }
             break;
         case eClose:
-            PostMessage(hWnd, WM_CLOSE, 0, 0);
+            PostMessageW(hWnd, WM_CLOSE, 0, 0);
             break;
         }
         return 0;
     }
     case WM_TIMER:
     {
+        ULONG iTemp;
+        ULONGLONG iTempTotal;
         //Memory
         if (GlobalMemoryStatusEx(pMemStatusEx))
         {
             static ULONG iPhysicalOld, iVirtualOld;
-
             //Physical
             iTemp = (pMemStatusEx->ullTotalPhys - pMemStatusEx->ullAvailPhys) >> 20;
             if (iTemp != iPhysicalOld)
             {
                 iPhysicalOld = iTemp;
-                _ultow(iPhysicalOld, pPhysical, 10);
-                wcscat(pPhysical, pPhysicalAll);
-                SetWindowText(hWndPhysical, pPhysical);
+                FNumToStrW(iPhysicalOld, pPhysical);
+                FCopyMemoryWEnd(pPhysical, pPhysicalAll);
+                SetWindowTextW(hWndPhysical, pPhysical);
             }
             //Virtual
             iTempTotal = pMemStatusEx->ullTotalPageFile - pMemStatusEx->ullAvailPageFile;
@@ -868,72 +630,82 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             if (iTemp != iVirtualOld)
             {
                 iVirtualOld = iTemp;
-                _ultow(iVirtualOld, pVirtual, 10);
+                FNumToStrW(iVirtualOld, pVirtual);
                 static ULONGLONG iVirtualAllOld;
                 if (pMemStatusEx->ullTotalPageFile != iVirtualAllOld)
                 {
                     iVirtualAllOld = pMemStatusEx->ullTotalPageFile;
-                    wcscat(_ultow(iVirtualAllOld >> 20, pVirtualAll+1, 10), L" MB");
+                    FNumToStrW(iVirtualAllOld >> 20, pVirtualAll+1);
+                    FCopyMemoryWEnd(pVirtualAll+1, L" MB");
                 }
-                wcscat(pVirtual, pVirtualAll);
-                SetWindowText(hWndVirtual, pVirtual);
+                FCopyMemoryWEnd(pVirtual, pVirtualAll);
+                SetWindowTextW(hWndVirtual, pVirtual);
             }
             //Physical Load
-            if (pMemStatusEx->dwMemoryLoad != iPhysicalPercentOld)
+            if (pMemStatusEx->dwMemoryLoad != g_iPhysicalPercentOld)
             {
-                iPhysicalPercentOld = pMemStatusEx->dwMemoryLoad;
-                InvalidateRect(hWndPrbPhysical, 0, FALSE);
+                g_iPhysicalPercentOld = pMemStatusEx->dwMemoryLoad;
+                InvalidateRect(g_hWndPrbPhysical, nullptr, FALSE);
             }
             //Virtual Load
             iTemp = iTempTotal*100/pMemStatusEx->ullTotalPageFile;
-            if (iTemp != iVirtualPercentOld)
+            if (iTemp != g_iVirtualPercentOld)
             {
-                iVirtualPercentOld = iTemp;
-                InvalidateRect(hWndPrbVirtual, 0, FALSE);
+                g_iVirtualPercentOld = iTemp;
+                InvalidateRect(g_hWndPrbVirtual, nullptr, FALSE);
             }
         }
 
-        //Process Count
+        //Number of processes
         iTemp = 0;
-        const HANDLE hProcess = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (hProcess != INVALID_HANDLE_VALUE)
+        if (NT_SUCCESS(NtQuerySystemInformation(SystemProcessInformation, pBufferProcInfo, g_dwBufferSizeProcInfo, nullptr)))
         {
-            if (Process32First(hProcess, pProcessEntry32))
-                do {++iTemp;} while (Process32Next(hProcess, pProcessEntry32));
-            CloseHandle(hProcess);
+            const SYSTEM_PROCESS_INFORMATION *pIt = pBufferProcInfo;
+            while (true)
+            {
+                ++iTemp;
+                if (pIt->NextEntryOffset)
+                    pIt = pointer_cast<const SYSTEM_PROCESS_INFORMATION*>(pointer_cast<const BYTE*>(pIt) + pIt->NextEntryOffset);
+                else
+                    break;
+            }
         }
+
         if (iTemp != iProcessesOld)
         {
             iProcessesOld = iTemp;
-            _ultow(iProcessesOld, pProcesses+11, 10);
-            SetWindowText(hWndProcUptime, pProcesses);
+            FNumToStrW(iProcessesOld, pProcesses+11);
+            SetWindowTextW(hWndProcUptime, pProcesses);
         }
+
+        ULONGLONG iTempCount;
 
         //CPU Load
         static ULONGLONG iLoadOld, iTotalOld;
-        if (GetSystemTimes(pFtIdleTime, pFtKernelTime, pFtUserTime))
+        //cast ok in little-endian only
+        if (GetSystemTimes(pointer_cast<FILETIME*>(pDwIdleTime), pointer_cast<FILETIME*>(pDwKernelTime), pointer_cast<FILETIME*>(pDwUserTime)))
         {
             iTempTotal = *pDwKernelTime + *pDwUserTime;
             iTempCount = iTempTotal - *pDwIdleTime;
-            iTemp = (iTempCount - iLoadOld)*100/(iTempTotal - iTotalOld);
+            iTemp = (iTempCount - iLoadOld)*100/(iTempTotal <= iTotalOld ? 1/*fix impossible error*/ : (iTempTotal - iTotalOld));
             iLoadOld = iTempCount;
             iTotalOld = iTempTotal;
-            if (iTemp != iCpuLoadOld)
+            if (iTemp != g_iCpuLoadOld)
             {
-                iCpuLoadOld = iTemp;
-                InvalidateRect(hWndPrbCpu, 0, FALSE);
+                g_iCpuLoadOld = iTemp;
+                InvalidateRect(g_hWndPrbCpu, nullptr, FALSE);
             }
         }
 
         //CPU Speed
-        if (wWinVer >= eWinVista && NT_SUCCESS(NtPowerInformation(ProcessorInformation, 0, 0, pPowerInformation, dwProcessorsSize)))
+        if (wWinVer >= _WIN32_WINNT_VISTA && NT_SUCCESS(NtPowerInformation(ProcessorInformation, nullptr, 0, pPowerInformation, dwProcessorsSize)))
         {
             iTempCount = 0;
-            //the method taken from Process Hacker (processhacker.sourceforge.net, sysinfo.c)
-            if (wWinVer >= eWin7)
+            //this method taken from Process Hacker (processhacker.sourceforge.net, sysinfo.c)
+            if (wWinVer >= _WIN32_WINNT_WIN7)
             {
-                static SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION *pCurrentPerformanceDistribution, *pPreviousPerformanceDistribution;
                 static bool bToggle = false;
+                SYSTEM_PROCESSOR_PERFORMANCE_DISTRIBUTION *pCurrentPerformanceDistribution, *pPreviousPerformanceDistribution;
                 if (bToggle)
                 {
                     pPreviousPerformanceDistribution = pBufferB;
@@ -947,114 +719,113 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     bToggle = true;
                 }
 
-                if (NT_SUCCESS(NtQuerySystemInformation(SystemProcessorPerformanceDistribution, pCurrentPerformanceDistribution, iBufferSize, 0)) &&
+                if (NT_SUCCESS(NtQuerySystemInformation(SystemProcessorPerformanceDistribution, pCurrentPerformanceDistribution, iBufferSize, nullptr)) &&
                         pCurrentPerformanceDistribution->ProcessorCount == dwNumberOfProcessors &&
                         pPreviousPerformanceDistribution->ProcessorCount == dwNumberOfProcessors)
                 {
-                    static SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION *stateDistribution;
-                    static SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION *stateDifference;
-
-                    for (iTempInt = 0; iTempInt < dwNumberOfProcessors; ++iTempInt)
+                    SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION *stateDistribution, *stateDifference;
+                    DWORD ii = 0;
+                    for (; ii < dwNumberOfProcessors; ++ii)
                     {
-                        stateDistribution = fByteToSppsd(fSppdToByte(pCurrentPerformanceDistribution) + pCurrentPerformanceDistribution->Offsets[iTempInt]);
-                        stateDifference = fByteToSppsd(pDifferences + iStateSize*iTempInt);
+                        stateDistribution = pointer_cast<SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION*>(pointer_cast<BYTE*>(pCurrentPerformanceDistribution) + pCurrentPerformanceDistribution->Offsets[ii]);
+                        stateDifference = pointer_cast<SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION*>(pDifferences + iStateSize*ii);
                         if (stateDistribution->StateCount == 2)
                         {
-                            if (wWinVer >= eWin8_1)
+                            if (wWinVer >= _WIN32_WINNT_WINBLUE)
                             {
                                 stateDifference->States[0] = stateDistribution->States[0];
                                 stateDifference->States[1] = stateDistribution->States[1];
                             }
                             else
                             {
-                                static const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8 *hitCountOld;
-                                hitCountOld = fSpphToSpphw(stateDistribution->States);
+                                const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8 *hitCountOld = pointer_cast<const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8*>(stateDistribution->States);
                                 stateDifference->States[0].Hits.QuadPart = hitCountOld->Hits;
                                 stateDifference->States[0].PercentFrequency = hitCountOld->PercentFrequency;
-                                hitCountOld = fByteToSpphw(fSpphToByte(stateDistribution->States) + sizeof(SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8));
+                                hitCountOld = pointer_cast<const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8*>(pointer_cast<BYTE*>(stateDistribution->States) + sizeof(SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8));
                                 stateDifference->States[1].Hits.QuadPart = hitCountOld->Hits;
                                 stateDifference->States[1].PercentFrequency = hitCountOld->PercentFrequency;
                             }
                         }
                         else
                         {
-                            iTempInt = 0;
+                            ii = 0;
                             break;
                         }
                     }
 
-                    if (iTempInt)
+                    if (ii)
                     {
-                        for (iTempInt = 0; iTempInt < dwNumberOfProcessors; ++iTempInt)
+                        for (ii = 0; ii < dwNumberOfProcessors; ++ii)
                         {
-                            stateDistribution = fByteToSppsd(fSppdToByte(pPreviousPerformanceDistribution) + pPreviousPerformanceDistribution->Offsets[iTempInt]);
-                            stateDifference = fByteToSppsd(pDifferences + iStateSize*iTempInt);
+                            stateDistribution = pointer_cast<SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION*>(pointer_cast<BYTE*>(pPreviousPerformanceDistribution) + pPreviousPerformanceDistribution->Offsets[ii]);
+                            stateDifference = pointer_cast<SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION*>(pDifferences + iStateSize*ii);
                             if (stateDistribution->StateCount == 2)
                             {
-                                if (wWinVer >= eWin8_1)
+                                if (wWinVer >= _WIN32_WINNT_WINBLUE)
                                 {
                                     stateDifference->States[0].Hits.QuadPart -= stateDistribution->States[0].Hits.QuadPart;
                                     stateDifference->States[1].Hits.QuadPart -= stateDistribution->States[1].Hits.QuadPart;
                                 }
                                 else
                                 {
-                                    stateDifference->States[0].Hits.QuadPart -= fSpphToSpphw(stateDistribution->States)->Hits;
-                                    stateDifference->States[1].Hits.QuadPart -= fByteToSpphw(fSpphToByte(stateDistribution->States) + sizeof(SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8))->Hits;
+                                    stateDifference->States[0].Hits.QuadPart -= pointer_cast<const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8*>(stateDistribution->States)->Hits;
+                                    stateDifference->States[1].Hits.QuadPart -= pointer_cast<const SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8*>(pointer_cast<BYTE*>(stateDistribution->States) + sizeof(SYSTEM_PROCESSOR_PERFORMANCE_HITCOUNT_WIN8))->Hits;
                                 }
                             }
                             else
                             {
-                                assert(false);
-                                iTempInt = 0;
+                                ___assert___(false);
+                                ii = 0;
                                 break;
                             }
                         }
 
-                        if (iTempInt)
+                        if (ii)
                         {
                             iTempTotal = 0;
-                            for (iTempInt = 0; iTempInt < dwNumberOfProcessors; ++iTempInt)
+                            for (ii = 0; ii < dwNumberOfProcessors; ++ii)
                             {
-                                stateDifference = fByteToSppsd(pDifferences + iStateSize*iTempInt);
-                                iTempCount += stateDifference->States[0].Hits.QuadPart + stateDifference->States[1].Hits.QuadPart;
-                                iTempTotal += stateDifference->States[0].Hits.QuadPart*stateDifference->States[0].PercentFrequency +
-                                        stateDifference->States[1].Hits.QuadPart*stateDifference->States[1].PercentFrequency;
+                                stateDifference = pointer_cast<SYSTEM_PROCESSOR_PERFORMANCE_STATE_DISTRIBUTION*>(pDifferences + iStateSize*ii);
+                                iTempCount += stateDifference->States[0].Hits.QuadPart;
+                                iTempTotal += stateDifference->States[0].Hits.QuadPart*stateDifference->States[0].PercentFrequency;
+                                iTempCount += stateDifference->States[1].Hits.QuadPart;
+                                iTempTotal += stateDifference->States[1].Hits.QuadPart*stateDifference->States[1].PercentFrequency;
                             }
                         }
                     }
                 }
             }
 
-            iTemp = iTempCount ? pPowerInformation[0].MaxMhz*iTempTotal/(iTempCount*1000) : pPowerInformation[0].CurrentMhz/10;
-            assert(iTemp >= 10 && iTemp <= 9900);
-            if (iTemp != iCpuSpeedOld)
+            ULONG iCpuAll = iTempCount ? pPowerInformation[0].MaxMhz*iTempTotal/(iTempCount*1000) : pPowerInformation[0].CurrentMhz/10;
+            ___assert___(iCpuAll >= 10 && iCpuAll <= 9900);
+            if (iCpuAll != g_iCpuSpeedOld)
             {
-                iCpuSpeedOld = iTemp;
-                iTempInt = iCpuSpeedOld/100;
+                g_iCpuSpeedOld = iCpuAll;
+                ULONG iCpuShort = g_iCpuSpeedOld/100;
 
-                wchar_t *pDelim = pCpuSpeed + 1;
-                if (iTempInt < 10)
-                    *pCpuSpeed = L'0' + iTempInt;
+                wchar_t *const pDelim = pCpuSpeed+1;
+                if (iCpuShort < 10)
+                    *pCpuSpeed = L'0' + iCpuShort;
                 else
                 {
-                    pCpuSpeed[0] = L'0' + iTempInt/10;
-                    pCpuSpeed[1] = L'0' + iTempInt%10;
+                    pCpuSpeed[0] = L'0' + iCpuShort/10;
+                    pCpuSpeed[1] = L'0' + iCpuShort%10;
                     ++pCpuSpeed;
                 }
                 *pDelim = L'.';
-                iTemp -= iTempInt*100;
-                pDelim[1] = L'0' + iTemp/10;
-                pDelim[2] = L'0' + iTemp%10;
-                wcscpy(pDelim+3, pCpuSpeedAll);
-                SetWindowText(hWndCpuSpeed, pCpuSpeed);
+                iCpuAll -= iCpuShort*100;
+                pDelim[1] = L'0' + iCpuAll/10;
+                pDelim[2] = L'0' + iCpuAll%10;
+                FCopyMemoryW(pDelim+3, pCpuSpeedAll);
+                SetWindowTextW(g_hWndCpuSpeed, pCpuSpeed);
             }
         }
         return 0;
     }
     case WM_WINDOWPOSCHANGING:
     {
-        static RECT rectArea;
-        if (SystemParametersInfo(SPI_GETWORKAREA, 0, &rectArea, 0))
+        RECT rectArea;
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &rectArea, 0))
         {
             WINDOWPOS *const wndPos = reinterpret_cast<WINDOWPOS*>(lParam);
             if (wndPos->x < rectArea.left)
@@ -1071,107 +842,144 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     }
     case WM_ENDSESSION:
     {
-        SendMessage(hWnd, WM_CLOSE, 0, 0);
+        SendMessageW(hWnd, WM_CLOSE, 0, 0);
         return 0;
     }
     case WM_DESTROY:
     {
-        if (SetTimer(hWnd, 1, 5000, 0))
-            KillTimer(hWnd, 1);
+        KillTimer(hWnd, 1);
         if (hWinEventHook)
             UnhookWinEvent(hWinEventHook);
-        if (hbrBackground)
-            DeleteObject(hbrBackground);
-        if (hbrLoad)
-            DeleteObject(hbrLoad);
-        if (hFont)
-            DeleteObject(hFont);
-        free(pPowerInformation);
-        free(pDifferences);
-        free(pBufferA);
-        free(pRunApp);
+        if (g_hbrBackground)
+            DeleteObject(g_hbrBackground);
+        if (g_hbrLoad)
+            DeleteObject(g_hbrLoad);
+        if (g_hFont)
+            DeleteObject(g_hFont);
+        if (hIconRunApp)
+            DestroyIcon(hIconRunApp);
+        if (hIconUptime)
+            DestroyIcon(hIconUptime);
+        if (hIconSavePos)
+            DestroyIcon(hIconSavePos);
+        if (hIconStg)
+            DestroyIcon(hIconStg);
+        if (hIconClose)
+            DestroyIcon(hIconClose);
+        if (pPowerInformation)
+            if (const HANDLE hProcHeap = GetProcessHeap())
+            {
+                if (pDifferences)
+                {
+                    if (pBufferA)
+                    {
+                        if (pBufferProcInfo)
+                            HeapFree(hProcHeap, HEAP_NO_SERIALIZE, pBufferProcInfo);
+                        HeapFree(hProcHeap, HEAP_NO_SERIALIZE, pBufferA);
+                    }
+                    HeapFree(hProcHeap, HEAP_NO_SERIALIZE, pDifferences);
+                }
+                HeapFree(hProcHeap, HEAP_NO_SERIALIZE, pPowerInformation);
+            }
         PostQuitMessage(0);
         return 0;
     }
     }
-    return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
 //-------------------------------------------------------------------------------------------------
-int main()
+static void FMain()
 {
-    if (const HWND hWnd = FindWindow(g_wGuidClass, 0))
-        PostMessage(hWnd, WM_CLOSE, 0, 0);
+    if (const HWND hWnd = FindWindowW(g_wGuidClass, nullptr))
+        PostMessageW(hWnd, WM_CLOSE, 0, 0);
 
     INITCOMMONCONTROLSEX initComCtrlEx;
     initComCtrlEx.dwSize = sizeof(INITCOMMONCONTROLSEX);
     initComCtrlEx.dwICC = ICC_STANDARD_CLASSES;
     if (InitCommonControlsEx(&initComCtrlEx) == TRUE)
     {
-        wchar_t wBuf[MAX_PATH+MAX_PATH+136];//[999000/999000 MB`999000/999000 MB`99.00/99.00 Ghz`Processes: 99000`Uptime: 9999d 23h 59m`/999000 MB`/999000 MB`/99.00 Ghz`100%`WorkerW`?]
-        const DWORD dwLen = GetModuleFileName(0, wBuf, MAX_PATH+1);
-        if (dwLen >= 8 && dwLen < MAX_PATH)
-            if (const wchar_t *const pDelimPath = wcsrchr(wBuf, L'\\'))
-                if (pDelimPath <= wBuf + MAX_PATH-1-28/*\SystemMonitorSettings96.exe*/)
+        wchar_t wBuf[MAX_PATH+MAX_PATH+2+136];//[999000/999000 MB`999000/999000 MB`99.00/99.00 Ghz`Processes: 99000`Uptime: 9999d 23h 59m`/999000 MB`/999000 MB`/99.00 Ghz`100%`WorkerW`?]
+        const DWORD dwLen = GetModuleFileNameW(nullptr, wBuf, MAX_PATH+1-4);        //".cfg"
+        if (dwLen >= 4 && dwLen < MAX_PATH-4)        //".cfg"
+        {
+            wchar_t *pDelim = wBuf+dwLen;
+            do
+            {
+                if (*--pDelim == L'\\')
+                    break;
+            } while (pDelim > wBuf);
+            if (pDelim >= wBuf+2 && pDelim <= wBuf+MAX_PATH-27)        //"\SystemMonitorSettings.exe`"
+            {
+                WNDCLASSEX wndCl;
+                wndCl.cbSize = sizeof(WNDCLASSEX);
+                wndCl.style = 0;
+                wndCl.lpfnWndProc = WindowProc;
+                wndCl.cbClsExtra = 0;
+                wndCl.cbWndExtra = 0;
+                wndCl.hInstance = GetModuleHandleW(nullptr);
+                wndCl.hIcon = nullptr;
+                wndCl.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+                wndCl.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);
+                wndCl.lpszMenuName = nullptr;
+                wndCl.lpszClassName = g_wGuidClass;
+                wndCl.hIconSm = nullptr;
+                if (RegisterClassExW(&wndCl))
                 {
-                    WNDCLASS wndCl;
-                    wndCl.style = 0;
-                    wndCl.lpfnWndProc = WindowProc;
-                    wndCl.cbClsExtra = 0;
-                    wndCl.cbWndExtra = 0;
-                    wndCl.hInstance = GetModuleHandle(0);
-                    wndCl.hIcon = 0;
-                    wndCl.hCursor = LoadCursor(0, IDC_ARROW);
-                    wndCl.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);
-                    wndCl.lpszMenuName = 0;
-                    wndCl.lpszClassName = g_wGuidClass;
-
-                    if (RegisterClass(&wndCl))
+                    PAINTSTRUCT ps;
+                    g_pPs = &ps;        //***
+                    if (const HWND hWndParent = CreateWindowExW(0, L"#32770", nullptr, 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr))        //hide from taskbar
                     {
-                        PAINTSTRUCT ps;
-                        pPs = &ps;        //***it's ok
-                        if (const HWND hWndParent = CreateWindowEx(0, WC_BUTTON, 0, 0, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, 0))
-                        {
-                            wcscpy(wBuf+dwLen-3, L"ini");
-                            wcscpy(wBuf+MAX_PATH, wBuf);
-                            wcscpy(wBuf+MAX_PATH+1+(pDelimPath-wBuf), g_wSettingsApp);
+                        FCopyMemoryW(wBuf+dwLen, L".cfg");
+                        wBuf[MAX_PATH] = L'"';
+                        FCopyMemoryW(wBuf+MAX_PATH+1, wBuf);
+                        FCopyMemoryW(wBuf+MAX_PATH+2+(pDelim-wBuf), g_wSettingsApp);
 
-                            MEMORYSTATUSEX memStatusEx;
-                            memStatusEx.dwLength = sizeof(MEMORYSTATUSEX);
-                            FILETIME fts[3];
-                            PROCESS_INFORMATION pi;
-                            STARTUPINFO si;
-                            memset(&si, 0, sizeof(STARTUPINFO));
-                            si.cb = sizeof(STARTUPINFO);
-                            SYSTEM_TIMEOFDAY_INFORMATION sysTimeInfo;
-                            PROCESSENTRY32 processEntry32;
-                            processEntry32.dwSize = sizeof(PROCESSENTRY32);
-                            RECT rectGeometry;
-                            TagCreateParams tgCreateParams;
-                            tgCreateParams.pBufPath = wBuf;
-                            tgCreateParams.pMemStatusEx = &memStatusEx;
-                            tgCreateParams.pFts = fts;
-                            tgCreateParams.pPi = &pi;
-                            tgCreateParams.pSi = &si;
-                            tgCreateParams.pSysTimeInfo = &sysTimeInfo;
-                            tgCreateParams.pProcessEntry32 = &processEntry32;
-                            tgCreateParams.pWndCl = &wndCl;
-                            tgCreateParams.pRectGeometry = &rectGeometry;
-                            if (CreateWindowEx(0, g_wGuidClass, L"SystemMonitor", 0, 0, 0, 0, 0, hWndParent, 0, wndCl.hInstance, &tgCreateParams) &&
-                                    SetWindowPos(hWndApp, HWND_BOTTOM, rectGeometry.left, rectGeometry.top, rectGeometry.right, rectGeometry.bottom, SWP_SHOWWINDOW | SWP_NOACTIVATE))
-                            {
-                                PostMessage(hWndApp, WM_TIMER, 0, 0);
-                                MSG msg;
-                                while (GetMessage(&msg, 0, 0, 0) > 0)
-                                    DispatchMessage(&msg);
-                            }
-                            SendMessage(hWndParent, WM_CLOSE, 0, 0);
+                        MEMORYSTATUSEX memStatusEx;
+                        memStatusEx.dwLength = sizeof(MEMORYSTATUSEX);
+                        ULONGLONG iFileTimes[3];
+                        PROCESS_INFORMATION pi;
+                        STARTUPINFO si;
+                        FZeroMemory(&si, sizeof(STARTUPINFO));
+                        si.cb = sizeof(STARTUPINFO);
+                        SYSTEM_TIMEOFDAY_INFORMATION sysTimeInfo;
+                        RECT rectGeometry;
+                        TagSaveSettings tgSave;
+                        TagCreateParams tgCreateParams;
+                        tgCreateParams.pBufPath = wBuf;
+                        tgCreateParams.pMemStatusEx = &memStatusEx;
+                        tgCreateParams.pFts = iFileTimes;
+                        tgCreateParams.pPi = &pi;
+                        tgCreateParams.pSi = &si;
+                        tgCreateParams.pSysTimeInfo = &sysTimeInfo;
+                        tgCreateParams.pWndCl = &wndCl;
+                        tgCreateParams.pRectGeometry = &rectGeometry;
+                        tgCreateParams.tgSave = &tgSave;        //***it's ok
+                        if (CreateWindowExW(0, g_wGuidClass, L"SystemMonitor", 0, 0, 0, 0, 0, hWndParent, nullptr, wndCl.hInstance, &tgCreateParams) &&
+                                SetWindowPos(g_hWndApp, HWND_BOTTOM, rectGeometry.left, rectGeometry.top, rectGeometry.right, rectGeometry.bottom, SWP_SHOWWINDOW | SWP_NOACTIVATE))
+                        {
+                            PostMessageW(g_hWndApp, WM_TIMER, 0, 0);
+                            MSG msg;
+                            while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+                                DispatchMessageW(&msg);
                         }
-                        if (!wndCl.lpszClassName)
-                            UnregisterClass(g_wGuidClassProgress, wndCl.hInstance);
-                        UnregisterClass(g_wGuidClass, wndCl.hInstance);
+                        SendMessageW(hWndParent, WM_CLOSE, 0, 0);
                     }
+                    if (!wndCl.lpszClassName)
+                        UnregisterClassW(g_wGuidClassProgress, wndCl.hInstance);
+                    UnregisterClassW(g_wGuidClass, wndCl.hInstance);
                 }
+            }
+        }
     }
+}
+
+//-------------------------------------------------------------------------------------------------
+extern "C" int start()
+{
+    ___assert___(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ &&
+                 sizeof(FILETIME) == sizeof(ULONGLONG));        //cast ULARGE_INTEGER* to FILETIME* correct little-endian only!
+    FMain();
+    ExitProcess(0);
     return 0;
 }

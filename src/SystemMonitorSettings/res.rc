@@ -1,2 +1,2 @@
-1 24 "SystemMonitorSettings.exe.manifest"
+1 MANIFEST "SystemMonitorSettings.exe.manifest"
 IDI_ICON1 ICON DISCARDABLE "icon.ico"
