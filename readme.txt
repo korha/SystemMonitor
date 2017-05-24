@@ -6,4 +6,5 @@ Like a gadget for Windows which lets monitor system performance
 - Uptime;
 - Doesn't use WMI;
 - Change theme/font;
-- DPI aware.
+- DPI aware;
+- Clean WinAPI (w/o CRT).

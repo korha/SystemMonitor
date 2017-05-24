@@ -11,7 +11,7 @@ static constexpr const wchar_t *const g_wGuidClassMainApp = L"App::ec19dd9c-939a
 #define ___assert___(cond) do{static_cast<void>(sizeof(cond));}while(false)
 #else
 #define ___assert___(cond) do{if(!(cond)){int i=__LINE__;char h[]="RUNTIME ASSERTION. Line:           "; \
-    if(i>=0){char *c=h+35;do{*--c=i%10+'0';i/=10;}while(i>0);}else{h[25]='?';} \
+    if(i>=0){char *c=h+35;do{*--c=i%10+'0';i/=10;}while(i>0);} \
     if(MessageBoxA(nullptr,__FILE__,h,MB_ICONERROR|MB_OKCANCEL)==IDCANCEL)ExitProcess(0);}}while(false)
 #endif
 
@@ -43,7 +43,7 @@ static inline wchar_t * FStrChrW(wchar_t *pSrc, const wchar_t wChar)
 }
 
 //-------------------------------------------------------------------------------------------------
-struct TagSaveSettings
+struct SSaveSettings
 {
     DWORD dwMagic;
     LONG iDx,
@@ -60,12 +60,12 @@ struct TagSaveSettings
     wchar_t wAppPath[1+MAX_PATH+1];
 };
 
-struct TagCreateParams
+struct SCreateParams
 {
     wchar_t *pBufPath,
     *pDelimPath;
     COLORREF *pColorRefCust;
-    TagSaveSettings *pTgSave;
+    SSaveSettings *pSSave;
 };
 
 //-------------------------------------------------------------------------------------------------
@@ -116,7 +116,7 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
             *pDelimPath;
     static COLORREF *pColorRefCust;
     static HBITMAP hBitmapColor;
-    static TagSaveSettings *tgSave;
+    static SSaveSettings *sSave;
 
     switch (uMsg)
     {
@@ -124,14 +124,14 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     {
         const CREATESTRUCT *const crStruct = reinterpret_cast<const CREATESTRUCT*>(lParam);
         const HINSTANCE hInst = crStruct->hInstance;
-        const TagCreateParams *const tgCreateParams = static_cast<const TagCreateParams*>(crStruct->lpCreateParams);
-        pBufPath = tgCreateParams->pBufPath;
-        pDelimPath = tgCreateParams->pDelimPath;
-        pColorRefCust = tgCreateParams->pColorRefCust;
+        const SCreateParams *const sCreateParams = static_cast<const SCreateParams*>(crStruct->lpCreateParams);
+        pBufPath = sCreateParams->pBufPath;
+        pDelimPath = sCreateParams->pDelimPath;
+        pColorRefCust = sCreateParams->pColorRefCust;
         *pColorRefCust = RGB(6, 176, 37);
         for (int i = 1; i < 17; ++i)
             pColorRefCust[i] = RGB(255, 255, 255);
-        tgSave = tgCreateParams->pTgSave;
+        sSave = sCreateParams->pSSave;
         if (const HWND hWndGbBase = CreateWindowExW(0, WC_BUTTON, L"Base", WS_CHILD | WS_VISIBLE | BS_GROUPBOX | BS_CENTER, 5, 5, 348, 87, hWnd, nullptr, hInst, nullptr))
             if (const HWND hWndUpdateInterval = CreateWindowExW(0, WC_STATIC, L"Update Interval (msecs):", WS_CHILD | WS_VISIBLE, 5, 20, 135, 18, hWndGbBase, nullptr, hInst, nullptr))
                 if (const HWND hWndEditUpdateInterval = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDIT, nullptr, WS_CHILD | WS_VISIBLE | ES_RIGHT | ES_NUMBER, 145, 18, 61, 20, hWndGbBase, nullptr, hInst, nullptr))
@@ -225,39 +225,39 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
                                                                                                                                             {
                                                                                                                                                 DWORD dwBytes;
                                                                                                                                                 LARGE_INTEGER iFileSize;
-                                                                                                                                                if (GetFileSizeEx(hFile, &iFileSize) && iFileSize.QuadPart == sizeof(TagSaveSettings) &&
-                                                                                                                                                        ReadFile(hFile, tgSave, sizeof(TagSaveSettings), &dwBytes, nullptr) && dwBytes == sizeof(TagSaveSettings))
+                                                                                                                                                if (GetFileSizeEx(hFile, &iFileSize) && iFileSize.QuadPart == sizeof(SSaveSettings) &&
+                                                                                                                                                        ReadFile(hFile, sSave, sizeof(SSaveSettings), &dwBytes, nullptr) && dwBytes == sizeof(SSaveSettings))
                                                                                                                                                     bOk = true;
                                                                                                                                                 CloseHandle(hFile);
                                                                                                                                             }
 
                                                                                                                                             HFONT hFontNew;
                                                                                                                                             if (bOk &&
-                                                                                                                                                    tgSave->dwMagic == dwMagic &&
-                                                                                                                                                    tgSave->iUpdateInterval >= 1000 && tgSave->iUpdateInterval <= 30000 &&
-                                                                                                                                                    tgSave->iOpacity &&
-                                                                                                                                                    tgSave->iThemeMargin <= 1000 &&
-                                                                                                                                                    tgSave->iThemeGap <= 1000 &&
-                                                                                                                                                    tgSave->iProgressbarWidth >= 80 && tgSave->iProgressbarWidth <= 10000 &&
-                                                                                                                                                    tgSave->iProgressbarHeight <= 1000 &&
-                                                                                                                                                    tgSave->iLabelHeight <= 1000 &&
-                                                                                                                                                    tgSave->wAppPath[1+MAX_PATH] == L'\0' &&
-                                                                                                                                                    (hFontNew = CreateFontIndirectW(&tgSave->logFont)))
+                                                                                                                                                    sSave->dwMagic == dwMagic &&
+                                                                                                                                                    sSave->iUpdateInterval >= 1000 && sSave->iUpdateInterval <= 30000 &&
+                                                                                                                                                    sSave->iOpacity &&
+                                                                                                                                                    sSave->iThemeMargin <= 1000 &&
+                                                                                                                                                    sSave->iThemeGap <= 1000 &&
+                                                                                                                                                    sSave->iProgressbarWidth >= 80 && sSave->iProgressbarWidth <= 10000 &&
+                                                                                                                                                    sSave->iProgressbarHeight <= 1000 &&
+                                                                                                                                                    sSave->iLabelHeight <= 1000 &&
+                                                                                                                                                    sSave->wAppPath[1+MAX_PATH] == L'\0' &&
+                                                                                                                                                    (hFontNew = CreateFontIndirectW(&sSave->logFont)))
                                                                                                                                             {
                                                                                                                                                 DeleteObject(hFontNew);
-                                                                                                                                                *pColorRefCust = tgSave->colorRef;
-                                                                                                                                                SendMessageW(hWndUpDownUpdateInterval, UDM_SETPOS, 0, tgSave->iUpdateInterval);
-                                                                                                                                                SendMessageW(hWndUpDownOpacity, UDM_SETPOS, 0, tgSave->iOpacity);
-                                                                                                                                                SendMessageW(hWndUpDownThemeMargin, UDM_SETPOS, 0, tgSave->iThemeMargin);
-                                                                                                                                                SendMessageW(hWndUpDownThemeGap, UDM_SETPOS, 0, tgSave->iThemeGap);
-                                                                                                                                                SendMessageW(hWndUpDownProgressbarWidth, UDM_SETPOS, 0, tgSave->iProgressbarWidth);
-                                                                                                                                                SendMessageW(hWndUpDownProgressbarHeight, UDM_SETPOS, 0, tgSave->iProgressbarHeight);
-                                                                                                                                                SendMessageW(hWndUpDownLabelHeight, UDM_SETPOS, 0, tgSave->iLabelHeight);
-                                                                                                                                                SetWindowTextW(hWndEditRunApp, tgSave->wAppPath);
+                                                                                                                                                *pColorRefCust = sSave->colorRef;
+                                                                                                                                                SendMessageW(hWndUpDownUpdateInterval, UDM_SETPOS, 0, sSave->iUpdateInterval);
+                                                                                                                                                SendMessageW(hWndUpDownOpacity, UDM_SETPOS, 0, sSave->iOpacity);
+                                                                                                                                                SendMessageW(hWndUpDownThemeMargin, UDM_SETPOS, 0, sSave->iThemeMargin);
+                                                                                                                                                SendMessageW(hWndUpDownThemeGap, UDM_SETPOS, 0, sSave->iThemeGap);
+                                                                                                                                                SendMessageW(hWndUpDownProgressbarWidth, UDM_SETPOS, 0, sSave->iProgressbarWidth);
+                                                                                                                                                SendMessageW(hWndUpDownProgressbarHeight, UDM_SETPOS, 0, sSave->iProgressbarHeight);
+                                                                                                                                                SendMessageW(hWndUpDownLabelHeight, UDM_SETPOS, 0, sSave->iLabelHeight);
+                                                                                                                                                SetWindowTextW(hWndEditRunApp, sSave->wAppPath);
                                                                                                                                             }
                                                                                                                                             else
                                                                                                                                             {
-                                                                                                                                                FCopyMemory(&tgSave->logFont, &nonClientMetrics.lfMessageFont, sizeof(LOGFONT));
+                                                                                                                                                FCopyMemory(&sSave->logFont, &nonClientMetrics.lfMessageFont, sizeof(LOGFONT));
                                                                                                                                                 *pColorRefCust = RGB(6, 176, 37);
                                                                                                                                                 SendMessageW(hWndUpDownUpdateInterval, UDM_SETPOS, 0, 5000);
                                                                                                                                                 SendMessageW(hWndUpDownOpacity, UDM_SETPOS, 0, 255);
@@ -285,27 +285,27 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         {
         case eBtnRunApp:
         {
-            tgSave->wAppPath[0] = L'"';
-            tgSave->wAppPath[1] = L'\0';
+            sSave->wAppPath[0] = L'"';
+            sSave->wAppPath[1] = L'\0';
             OPENFILENAME openFileName;
             FZeroMemory(&openFileName, sizeof(OPENFILENAME));
             openFileName.lStructSize = sizeof(OPENFILENAME);
             openFileName.hwndOwner = hWnd;
             openFileName.lpstrFilter = L"Executable (*.exe)\0*.exe\0All Files (*.*)\0*.*\0";
             openFileName.nFilterIndex = 1;
-            openFileName.lpstrFile = tgSave->wAppPath+1;
+            openFileName.lpstrFile = sSave->wAppPath+1;
             openFileName.nMaxFile = MAX_PATH;
             openFileName.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
             if (GetOpenFileNameW(&openFileName))
             {
-                if (wchar_t *pDelim = FStrChrW(tgSave->wAppPath, L' '))
+                if (wchar_t *pDelim = FStrChrW(sSave->wAppPath, L' '))
                 {
                     *(pDelim = FStrChrW(pDelim, L'\0')) = L'"';
                     pDelim[1] = L'\0';
-                    SetWindowTextW(hWndEditRunApp, tgSave->wAppPath);
+                    SetWindowTextW(hWndEditRunApp, sSave->wAppPath);
                 }
                 else
-                    SetWindowTextW(hWndEditRunApp, tgSave->wAppPath+1);
+                    SetWindowTextW(hWndEditRunApp, sSave->wAppPath+1);
             }
             break;
         }
@@ -336,7 +336,7 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
             FZeroMemory(&chooseFont, sizeof(CHOOSEFONT));
             chooseFont.lStructSize = sizeof(CHOOSEFONT);
             chooseFont.hwndOwner = hWnd;
-            chooseFont.lpLogFont = &tgSave->logFont;
+            chooseFont.lpLogFont = &sSave->logFont;
             chooseFont.Flags = CF_SCREENFONTS | CF_EFFECTS | CF_INITTOLOGFONTSTRUCT;
             ChooseFontW(&chooseFont);
             break;
@@ -356,45 +356,45 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
             LRESULT iRes = SendMessageW(hWndUpDownUpdateInterval, UDM_GETPOS, 0, 0);
             if (iRes >= 1000 && iRes <= 30000)
             {
-                tgSave->iUpdateInterval = iRes;
+                sSave->iUpdateInterval = iRes;
                 if ((iRes = SendMessageW(hWndUpDownOpacity, UDM_GETPOS, 0, 0)) > 0 && iRes <= 255)
                 {
-                    tgSave->iOpacity = iRes;
+                    sSave->iOpacity = iRes;
                     if ((iRes = SendMessageW(hWndUpDownThemeMargin, UDM_GETPOS, 0, 0)) >= 0 && iRes <= 1000)
                     {
-                        tgSave->iThemeMargin = iRes;
+                        sSave->iThemeMargin = iRes;
                         if ((iRes = SendMessageW(hWndUpDownThemeGap, UDM_GETPOS, 0, 0)) >= 0 && iRes <= 1000)
                         {
-                            tgSave->iThemeGap = iRes;
+                            sSave->iThemeGap = iRes;
                             if ((iRes = SendMessageW(hWndUpDownProgressbarWidth, UDM_GETPOS, 0, 0)) >= 80 && iRes <= 10000)
                             {
-                                tgSave->iProgressbarWidth = iRes;
+                                sSave->iProgressbarWidth = iRes;
                                 if ((iRes = SendMessageW(hWndUpDownProgressbarHeight, UDM_GETPOS, 0, 0)) >= 0 && iRes <= 1000)
                                 {
-                                    tgSave->iProgressbarHeight = iRes;
+                                    sSave->iProgressbarHeight = iRes;
                                     if ((iRes = SendMessageW(hWndUpDownLabelHeight, UDM_GETPOS, 0, 0)) >= 0 && iRes <= 1000)
                                     {
-                                        tgSave->iLabelHeight = iRes;
+                                        sSave->iLabelHeight = iRes;
                                         iRes = SendMessageW(hWndEditRunApp, EM_LINELENGTH, 0, 0);
                                         if (iRes >= 0 && iRes < MAX_PATH+2)
                                         {
-                                            *static_cast<WORD*>(static_cast<void*>(tgSave->wAppPath)) = iRes+1;        //first word contains buffer size (+1 to check trim)
-                                            if (SendMessageW(hWndEditRunApp, EM_GETLINE, 0, reinterpret_cast<LPARAM>(tgSave->wAppPath)) == iRes)
+                                            *static_cast<WORD*>(static_cast<void*>(sSave->wAppPath)) = iRes+1;        //first word contains buffer size (+1 to check trim)
+                                            if (SendMessageW(hWndEditRunApp, EM_GETLINE, 0, reinterpret_cast<LPARAM>(sSave->wAppPath)) == iRes)
                                             {
-                                                tgSave->wAppPath[iRes] = L'\0';
-                                                tgSave->wAppPath[1+MAX_PATH] = L'\0';
-                                                if (tgSave->dwMagic != dwMagic)
+                                                sSave->wAppPath[iRes] = L'\0';
+                                                sSave->wAppPath[1+MAX_PATH] = L'\0';
+                                                if (sSave->dwMagic != dwMagic)
                                                 {
-                                                    tgSave->dwMagic = dwMagic;
-                                                    tgSave->iDx = 0;
-                                                    tgSave->iDy = 0;
+                                                    sSave->dwMagic = dwMagic;
+                                                    sSave->iDx = 0;
+                                                    sSave->iDy = 0;
                                                 }
-                                                tgSave->colorRef = *pColorRefCust;
+                                                sSave->colorRef = *pColorRefCust;
                                                 const HANDLE hFile = CreateFileW(pBufPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
                                                 if (hFile != INVALID_HANDLE_VALUE)
                                                 {
                                                     DWORD dwBytes;
-                                                    if (WriteFile(hFile, tgSave, sizeof(TagSaveSettings), &dwBytes, nullptr) && dwBytes == sizeof(TagSaveSettings))
+                                                    if (WriteFile(hFile, sSave, sizeof(SSaveSettings), &dwBytes, nullptr) && dwBytes == sizeof(SSaveSettings))
                                                         bOk = true;
                                                     CloseHandle(hFile);
                                                 }
@@ -478,18 +478,18 @@ static void FMain()
                     RECT rectArea;
                     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &rectArea, 0))
                     {
-                        TagCreateParams tgCreateParams;
-                        tgCreateParams.pBufPath = wBuf;
+                        SCreateParams sCreateParams;
+                        sCreateParams.pBufPath = wBuf;
                         FCopyMemoryW(pDelim+1, L"SystemMonitor.exe.cfg");
-                        tgCreateParams.pDelimPath = pDelim+18;        //"\SystemMonitor.exe"
+                        sCreateParams.pDelimPath = pDelim+18;        //"\SystemMonitor.exe"
                         COLORREF colorRefCust[1+16+100];        //current+custom+image*
-                        tgCreateParams.pColorRefCust = colorRefCust;        //***
-                        TagSaveSettings tgSave;
-                        tgCreateParams.pTgSave = &tgSave;        //***
+                        sCreateParams.pColorRefCust = colorRefCust;        //***
+                        SSaveSettings sSave;
+                        sCreateParams.pSSave = &sSave;        //***
                         rect.right -= rect.left;
                         rect.bottom -= rect.top;
                         if (CreateWindowExW(0, g_wGuidClass, L"SystemMonitorSettings", (WS_OVERLAPPEDWINDOW | WS_VISIBLE) & ~(WS_MAXIMIZEBOX | WS_SIZEBOX),
-                                            (rectArea.right-rectArea.left)/2-rect.right/2, (rectArea.bottom-rectArea.top)/2-rect.bottom/2, rect.right, rect.bottom, nullptr, nullptr, hInst, &tgCreateParams))
+                                            (rectArea.right-rectArea.left)/2-rect.right/2, (rectArea.bottom-rectArea.top)/2-rect.bottom/2, rect.right, rect.bottom, nullptr, nullptr, hInst, &sCreateParams))
                         {
                             MSG msg;
                             while (GetMessageW(&msg, nullptr, 0, 0) > 0)

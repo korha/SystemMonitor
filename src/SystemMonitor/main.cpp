@@ -31,7 +31,7 @@ static HFONT g_hFont;
 #define ___assert___(cond) do{static_cast<void>(sizeof(cond));}while(false)
 #else
 #define ___assert___(cond) do{if(!(cond)){int i=__LINE__;char h[]="RUNTIME ASSERTION. Line:           "; \
-    if(i>=0){char *c=h+35;do{*--c=i%10+'0';i/=10;}while(i>0);}else{h[25]='?';} \
+    if(i>=0){char *c=h+35;do{*--c=i%10+'0';i/=10;}while(i>0);} \
     if(MessageBoxA(nullptr,__FILE__,h,MB_ICONERROR|MB_OKCANCEL)==IDCANCEL)ExitProcess(0);}}while(false)
 #endif
 
@@ -150,7 +150,7 @@ typedef struct _SYSTEM_PROCESS_INFORMATION
     //...
 } SYSTEM_PROCESS_INFORMATION;
 
-struct TagSaveSettings
+struct SSaveSettings
 {
     DWORD dwMagic;
     LONG iDx,
@@ -167,7 +167,7 @@ struct TagSaveSettings
     wchar_t wAppPath[MAX_PATH+2];
 };
 
-struct TagCreateParams
+struct SCreateParams
 {
     wchar_t *pBufPath;
     MEMORYSTATUSEX *pMemStatusEx;
@@ -177,7 +177,7 @@ struct TagCreateParams
     SYSTEM_TIMEOFDAY_INFORMATION *pSysTimeInfo;
     WNDCLASSEX *pWndCl;
     RECT *pRectGeometry;
-    TagSaveSettings *tgSave;
+    SSaveSettings *sSave;
 };
 
 //-------------------------------------------------------------------------------------------------
@@ -298,26 +298,26 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     static WORD wWinVer;
     static RECT rectWindow;
     static ULONG iProcessesOld;
-    static TagSaveSettings *pTgSave;
+    static SSaveSettings *pTgSave;
 
     switch (uMsg)
     {
     case WM_CREATE:
     {
         const CREATESTRUCT *const crStruct = reinterpret_cast<const CREATESTRUCT*>(lParam);
-        const TagCreateParams *tgCreateParams = static_cast<const TagCreateParams*>(crStruct->lpCreateParams);
+        const SCreateParams *tgCreateParams = static_cast<const SCreateParams*>(crStruct->lpCreateParams);
         pPath = tgCreateParams->pBufPath;
         pPi = tgCreateParams->pPi;
         pSi = tgCreateParams->pSi;
         const HANDLE hFile = CreateFileW(pPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile != INVALID_HANDLE_VALUE)
         {
-            pTgSave = tgCreateParams->tgSave;
+            pTgSave = tgCreateParams->sSave;
             bool bOk = false;
             DWORD dwBytes;
             LARGE_INTEGER iFileSize;
-            if (GetFileSizeEx(hFile, &iFileSize) && iFileSize.QuadPart == sizeof(TagSaveSettings) &&
-                    ReadFile(hFile, pTgSave, sizeof(TagSaveSettings), &dwBytes, nullptr) && dwBytes == sizeof(TagSaveSettings))
+            if (GetFileSizeEx(hFile, &iFileSize) && iFileSize.QuadPart == sizeof(SSaveSettings) &&
+                    ReadFile(hFile, pTgSave, sizeof(SSaveSettings), &dwBytes, nullptr) && dwBytes == sizeof(SSaveSettings))
                 bOk = true;
             CloseHandle(hFile);
 
@@ -586,7 +586,7 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
                 if (hFile != INVALID_HANDLE_VALUE)
                 {
                     DWORD dwBytes;
-                    WriteFile(hFile, pTgSave, sizeof(TagSaveSettings), &dwBytes, nullptr);
+                    WriteFile(hFile, pTgSave, sizeof(SSaveSettings), &dwBytes, nullptr);
                     CloseHandle(hFile);
                 }
             }
@@ -661,14 +661,10 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         if (NT_SUCCESS(NtQuerySystemInformation(SystemProcessInformation, pBufferProcInfo, g_dwBufferSizeProcInfo, nullptr)))
         {
             const SYSTEM_PROCESS_INFORMATION *pIt = pBufferProcInfo;
-            while (true)
-            {
-                ++iTemp;
-                if (pIt->NextEntryOffset)
-                    pIt = pointer_cast<const SYSTEM_PROCESS_INFORMATION*>(pointer_cast<const BYTE*>(pIt) + pIt->NextEntryOffset);
-                else
-                    break;
-            }
+            do {++iTemp;}
+            while (pIt->NextEntryOffset ?
+                   (pIt = pointer_cast<const SYSTEM_PROCESS_INFORMATION*>(pointer_cast<const BYTE*>(pIt) + pIt->NextEntryOffset), true) :
+                   false);
         }
 
         if (iTemp != iProcessesOld)
@@ -682,12 +678,11 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
 
         //CPU Load
         static ULONGLONG iLoadOld, iTotalOld;
-        //cast ok in little-endian only
         if (GetSystemTimes(pointer_cast<FILETIME*>(pDwIdleTime), pointer_cast<FILETIME*>(pDwKernelTime), pointer_cast<FILETIME*>(pDwUserTime)))
         {
             iTempTotal = *pDwKernelTime + *pDwUserTime;
             iTempCount = iTempTotal - *pDwIdleTime;
-            iTemp = (iTempCount - iLoadOld)*100/(iTempTotal <= iTotalOld ? 1/*fix impossible error*/ : (iTempTotal - iTotalOld));
+            iTemp = (iTempCount - iLoadOld)*100/(iTempTotal <= iTotalOld ? 1 : (iTempTotal - iTotalOld));
             iLoadOld = iTempCount;
             iTotalOld = iTempTotal;
             if (iTemp != g_iCpuLoadOld)
@@ -701,7 +696,7 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         if (wWinVer >= _WIN32_WINNT_VISTA && NT_SUCCESS(NtPowerInformation(ProcessorInformation, nullptr, 0, pPowerInformation, dwProcessorsSize)))
         {
             iTempCount = 0;
-            //this method taken from Process Hacker (processhacker.sourceforge.net, sysinfo.c)
+            //this method taken from Process Hacker (processhacker.sourceforge.net: sysinfo.c)
             if (wWinVer >= _WIN32_WINNT_WIN7)
             {
                 static bool bToggle = false;
@@ -944,18 +939,18 @@ static void FMain()
                         si.cb = sizeof(STARTUPINFO);
                         SYSTEM_TIMEOFDAY_INFORMATION sysTimeInfo;
                         RECT rectGeometry;
-                        TagSaveSettings tgSave;
-                        TagCreateParams tgCreateParams;
-                        tgCreateParams.pBufPath = wBuf;
-                        tgCreateParams.pMemStatusEx = &memStatusEx;
-                        tgCreateParams.pFts = iFileTimes;
-                        tgCreateParams.pPi = &pi;
-                        tgCreateParams.pSi = &si;
-                        tgCreateParams.pSysTimeInfo = &sysTimeInfo;
-                        tgCreateParams.pWndCl = &wndCl;
-                        tgCreateParams.pRectGeometry = &rectGeometry;
-                        tgCreateParams.tgSave = &tgSave;        //***it's ok
-                        if (CreateWindowExW(0, g_wGuidClass, L"SystemMonitor", 0, 0, 0, 0, 0, hWndParent, nullptr, wndCl.hInstance, &tgCreateParams) &&
+                        SSaveSettings tgSave;
+                        SCreateParams sCreateParams;
+                        sCreateParams.pBufPath = wBuf;
+                        sCreateParams.pMemStatusEx = &memStatusEx;
+                        sCreateParams.pFts = iFileTimes;
+                        sCreateParams.pPi = &pi;
+                        sCreateParams.pSi = &si;
+                        sCreateParams.pSysTimeInfo = &sysTimeInfo;
+                        sCreateParams.pWndCl = &wndCl;
+                        sCreateParams.pRectGeometry = &rectGeometry;
+                        sCreateParams.sSave = &tgSave;        //***it's ok
+                        if (CreateWindowExW(0, g_wGuidClass, L"SystemMonitor", 0, 0, 0, 0, 0, hWndParent, nullptr, wndCl.hInstance, &sCreateParams) &&
                                 SetWindowPos(g_hWndApp, HWND_BOTTOM, rectGeometry.left, rectGeometry.top, rectGeometry.right, rectGeometry.bottom, SWP_SHOWWINDOW | SWP_NOACTIVATE))
                         {
                             PostMessageW(g_hWndApp, WM_TIMER, 0, 0);
@@ -977,8 +972,7 @@ static void FMain()
 //-------------------------------------------------------------------------------------------------
 extern "C" int start()
 {
-    ___assert___(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ &&
-                 sizeof(FILETIME) == sizeof(ULONGLONG));        //cast ULARGE_INTEGER* to FILETIME* correct little-endian only!
+    ___assert___(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ && sizeof(FILETIME) == sizeof(ULONGLONG));
     FMain();
     ExitProcess(0);
     return 0;
