@@ -541,7 +541,6 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     case WM_COMMAND:
     {
         ___assert___(HIWORD(wParam) == 0);
-        bool bRunApp = false;
         switch (wParam)
         {
         case eUptime:
@@ -593,9 +592,14 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
             break;
         }
         case eRunApp:
-            bRunApp = true;
+            if (CreateProcessW(nullptr, pTgSave->wAppPath, nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, pSi, pPi))
+            {
+                CloseHandle(pPi->hThread);
+                CloseHandle(pPi->hProcess);
+            }
+            break;
         case eStg:
-            if (CreateProcessW(nullptr, bRunApp ? pTgSave->wAppPath : pPath+MAX_PATH, nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, pSi, pPi))
+            if (CreateProcessW(nullptr, pPath+MAX_PATH, nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, pSi, pPi))
             {
                 CloseHandle(pPi->hThread);
                 CloseHandle(pPi->hProcess);

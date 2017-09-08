@@ -298,14 +298,10 @@ static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
             openFileName.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
             if (GetOpenFileNameW(&openFileName))
             {
-                if (wchar_t *pDelim = FStrChrW(sSave->wAppPath, L' '))
-                {
-                    *(pDelim = FStrChrW(pDelim, L'\0')) = L'"';
-                    pDelim[1] = L'\0';
-                    SetWindowTextW(hWndEditRunApp, sSave->wAppPath);
-                }
-                else
-                    SetWindowTextW(hWndEditRunApp, sSave->wAppPath+1);
+                wchar_t *const pDelim = FStrChrW(sSave->wAppPath, L'\0');
+                *pDelim = L'"';
+                pDelim[1] = L'\0';
+                SetWindowTextW(hWndEditRunApp, sSave->wAppPath);
             }
             break;
         }

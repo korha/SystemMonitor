@@ -1,4 +1,4 @@
-Like a gadget for Windows which lets monitor system performance
+Like a gadget for Windows which lets monitor system performance:
 - Physical and virtual memory load;
 - CPU load;
 - CPU speed (turbo boost / turbo core support);
@@ -6,5 +6,4 @@ Like a gadget for Windows which lets monitor system performance
 - Uptime;
 - Doesn't use WMI;
 - Change theme/font;
-- DPI aware;
-- Clean WinAPI (w/o CRT).
+- DPI aware.
